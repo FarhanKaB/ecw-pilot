@@ -1,0 +1,18 @@
+{
+  "shared": {
+    "history":   { "label": "History",    "path": "shared/history.js",    "version": "1.0", "notes": ["Patient history now loads as its own shared file"] },
+    "sort":      { "label": "Sort",       "path": "shared/sort.js",       "version": "1.0", "notes": [] },
+    "claimLink": { "label": "Claim Link", "path": "shared/claim-link.js", "version": "1.0", "notes": [] }
+  },
+  "clients": {
+    "highland": {
+      "name": "HighLand",
+      "hosts": ["nyhmcnapp.ecwcloud.com"],
+      "files": {
+        "coding": { "label": "Coding", "path": "clients/highland/coding.js", "version": "1.0", "notes": ["First ECW Pilot release for HighLand"] },
+        "link":   { "label": "Link",   "path": "clients/highland/link.js",   "version": "1.0", "notes": [] }
+      },
+      "defaults": { "sort": false, "link": false, "claimLink": false }
+    }
+  }
+}

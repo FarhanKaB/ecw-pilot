@@ -11,9 +11,9 @@
     "sort": {
       "label": "Smart Sort",
       "path": "shared/sort.js",
-      "version": "1.1",
+      "version": "1.3",
       "notes": [
-        "Smart Sort: orders codes with the Smart Sort lists, sets a primary diagnosis if none is set, applies modifiers"
+        "Detects an un-starred primary while the tab is open (reads what the \u2605 shows)"
       ]
     },
     "claimLink": {
@@ -33,17 +33,17 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.5",
+          "version": "1.8",
           "notes": [
-            "Removing codes no longer shows eCW's \"Are you sure?\" warning"
+            "Link button shows only inside the panel on the Billing tab"
           ]
         },
         "link": {
           "label": "Link",
           "path": "clients/highland/link.js",
-          "version": "1.3",
+          "version": "1.5",
           "notes": [
-            "Works with Smart Sort's modifiers (keeps SL)"
+            "Auto mode: the Link button is now a soft green \"Linked \u2713\" (click to link again)"
           ]
         }
       },

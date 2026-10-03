@@ -1,18 +1,58 @@
 {
   "shared": {
-    "history":   { "label": "History",    "path": "shared/history.js",    "version": "1.0", "notes": ["Patient history now loads as its own shared file"] },
-    "sort":      { "label": "Sort",       "path": "shared/sort.js",       "version": "1.0", "notes": [] },
-    "claimLink": { "label": "Claim Link", "path": "shared/claim-link.js", "version": "1.0", "notes": [] }
+    "history": {
+      "label": "History",
+      "path": "shared/history.js",
+      "version": "1.0",
+      "notes": [
+        "Patient history now loads as its own shared file"
+      ]
+    },
+    "sort": {
+      "label": "Smart Sort",
+      "path": "shared/sort.js",
+      "version": "1.1",
+      "notes": [
+        "Smart Sort: orders codes with the Smart Sort lists, sets a primary diagnosis if none is set, applies modifiers"
+      ]
+    },
+    "claimLink": {
+      "label": "Claim Link",
+      "path": "shared/claim-link.js",
+      "version": "1.0",
+      "notes": []
+    }
   },
   "clients": {
     "highland": {
       "name": "HighLand",
-      "hosts": ["nyhmcnapp.ecwcloud.com"],
+      "hosts": [
+        "nyhmcnapp.ecwcloud.com"
+      ],
       "files": {
-        "coding": { "label": "Coding", "path": "clients/highland/coding.js", "version": "1.0", "notes": ["First ECW Pilot release for HighLand"] },
-        "link":   { "label": "Link",   "path": "clients/highland/link.js",   "version": "1.0", "notes": [] }
+        "coding": {
+          "label": "Coding",
+          "path": "clients/highland/coding.js",
+          "version": "1.5",
+          "notes": [
+            "Removing codes no longer shows eCW's \"Are you sure?\" warning"
+          ]
+        },
+        "link": {
+          "label": "Link",
+          "path": "clients/highland/link.js",
+          "version": "1.3",
+          "notes": [
+            "Works with Smart Sort's modifiers (keeps SL)"
+          ]
+        }
       },
-      "defaults": { "sort": false, "link": false, "claimLink": false }
+      "defaults": {
+        "sort": false,
+        "link": true,
+        "linkAuto": false,
+        "claimLink": false
+      }
     }
   }
 }

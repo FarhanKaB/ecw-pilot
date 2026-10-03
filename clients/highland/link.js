@@ -225,7 +225,6 @@
         return false;
     }
 
-    const EXCLUDED_ICDS = new Set(["E66.9","E66.01","E66.09","E66.3","F17.210","F17.200","F17.220","E55.9"]);
     const CHRONIC_CODES = new Set([
         "B18.8","I10","E03.8","E03.9","E07.89","E07.9","E11.21","E11.22","E11.40","E11.42","E11.49","E11.59",
         "E11.610","E11.618","E11.65","E11.69","E11.8","E11.9","E44.0","E78.1","E78.2","E78.5",
@@ -463,12 +462,6 @@
         if (dups.length) showNotification([`Duplicate ICD prefix conflict: ${dups.map(a => a.join(', ')).join(' | ')}`]);
     }
 
-    function checkICDOrderZBeforeDx(icds) {
-        let seenZ = false; const out = [];
-        icds.forEach(({ code }) => { if (code.startsWith('Z')) seenZ = true; else if (seenZ) out.push(code); });
-        if (out.length) showNotification([`Diagnosis code(s) ${[...new Set(out)].join(', ')} found below a Z code — reorder ICD list`]);
-    }
-
     function checkDiabetesPrediabetesConflict(icds) {
         const codes = icds.map(i => i.code);
         if (codes.some(c => /^E0[89]|^E1[0-3]|^O24/.test(c)) && codes.some(c => c === 'R73.03' || c.startsWith('R7303')))
@@ -492,17 +485,6 @@
             warnings.push(`CPT ${code} unsuitable for age ${age}. Suggested: ${correct}`);
         });
         if (warnings.length) showNotification(warnings);
-    }
-
-    function checkChronicDiseaseCountFor99214(icds) {
-        const codes = new Set();
-        icds.forEach(i => {
-            const c = extractICDCode(i.rawText);
-            if (c && !c.startsWith('Z') && !EXCLUDED_ICDS.has(c)) codes.add(c);
-        });
-        console.log('[99214 check] counted codes:', Array.from(codes));
-        if (codes.size >= 4 && [...codes].some(c => CHRONIC_CODES.has(c)))
-            showNotification(['99214 can be added'], false);
     }
 
     let lastL21NotifyTime = 0;
@@ -566,10 +548,10 @@
         domPlans.forEach(applyPlanToDOM);
 
         alertDuplicateICDStart(icds);
-        checkICDOrderZBeforeDx(icds);
+        // (removed: "Diagnosis code(s) … found below a Z code" — Add to EMR orders Z codes last)
         alertDuplicateCPT(cpts);
         validatePreventiveCPT(cpts, age);
-        checkChronicDiseaseCountFor99214(icds);
+        // (removed: "99214 can be added" — the coding panel decides the office visit itself)
         checkForL21(icds, age);
         checkForCancerICD(icds);
         checkDiabetesPrediabetesConflict(icds);
@@ -596,6 +578,7 @@
     }
 
     function runLink(quiet) {
+        flashLinking();
         quietRun = !!quiet;
         let result = null;
         try { result = mainFlow(); }
@@ -620,21 +603,37 @@
     }
 
     // ═══ Link button (Off = disabled, Manual/Auto = active) ═════════════
+    // Manual = solid red "Link" (a task) · Auto = soft green "Linked ✓"
+    // (done — click to link again) · Off = grey, disabled.
     const BTN_ON = '#FF0000', BTN_HOVER = '#8c8c8c', BTN_OFF = '#c9ced1';
+    const AUTO_BG = '#e4f3e9', AUTO_BG_HOVER = '#d3ecdb', AUTO_INK = '#2f7d4f', AUTO_LINE = '#b9dfc6';
+    let busyLabelUntil = 0;
 
     function syncButton() {
         const btn = document.getElementById('ecwLinkBtnNoDelete');
         if (!btn) return;
         const mode = linkMode();
         const off = mode === 'off';
+        const auto = mode === 'auto';
         btn.disabled = off;
-        btn.style.background = off ? BTN_OFF : BTN_ON;
+        btn.style.background = off ? BTN_OFF : (auto ? AUTO_BG : BTN_ON);
+        btn.style.color = off ? '#6b7478' : (auto ? AUTO_INK : '#fff');
+        btn.style.border = auto ? `1px solid ${AUTO_LINE}` : 'none';
         btn.style.cursor = off ? 'not-allowed' : 'pointer';
-        btn.style.color = off ? '#6b7478' : '#fff';
-        const label = mode === 'auto' ? 'Link · Auto' : 'Link';
+        if (Date.now() < busyLabelUntil) return;          // "Linking…" is showing
+        const label = auto ? 'Linked ✓' : 'Link';
         if (btn.textContent !== label) btn.textContent = label;
         btn.title = off ? 'Link is off — turn it on in ECW Pilot settings'
-            : (mode === 'auto' ? 'Auto-link is on — links whenever the codes change and after Add to EMR. Click to link now.' : 'Link the diagnosis pointers now');
+            : (auto ? 'Auto-link is on — links whenever the codes change and after Add to EMR. Click to link again.' : 'Link the diagnosis pointers now');
+    }
+
+    // Brief "Linking…" on the button while a run happens.
+    function flashLinking() {
+        const btn = document.getElementById('ecwLinkBtnNoDelete');
+        if (!btn) return;
+        btn.textContent = 'Linking…';
+        busyLabelUntil = Date.now() + 700;
+        setTimeout(syncButton, 750);
     }
 
     function createButton() {
@@ -648,13 +647,16 @@
             background: BTN_ON, color: '#fff', fontSize: '13px', border: 'none', borderRadius: '8px',
             cursor: 'pointer', boxShadow: '0 3px 8px rgba(0,0,0,0.25)', transition: 'background 0.3s'
         });
-        btn.addEventListener('mouseenter', () => { if (!btn.disabled) btn.style.background = BTN_HOVER; });
-        btn.addEventListener('mouseleave', () => { if (!btn.disabled) btn.style.background = BTN_ON; });
+        btn.addEventListener('mouseenter', () => { if (!btn.disabled) btn.style.background = linkMode() === 'auto' ? AUTO_BG_HOVER : BTN_HOVER; });
+        btn.addEventListener('mouseleave', () => syncButton());
         btn.addEventListener('click', () => {
             if (linkMode() === 'off') return;
             shownKeys.clear();          // a click shows every warning again
             runLink(false);
         });
+        // With ECW Pilot the panel decides where/when it shows (inside the
+        // panel, Billing only); on its own it floats as before.
+        if (PILOT) btn.style.display = 'none';
         document.body.appendChild(btn);
         syncButton();
     }

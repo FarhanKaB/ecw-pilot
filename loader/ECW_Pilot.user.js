@@ -1,13 +1,18 @@
 // ==UserScript==
 // @name         ECW Pilot
 // @namespace    ecw-pilot
-// @version      1.0
+// @version      1.1
 // @description  Loads ECW Pilot for your practice from GitHub: coding panel, patient history, Sort, Link and Claim Link.
 // @match        *://*.ecwcloud.com/*
 // @match        *://*.eclinicalworks.com/*
 // @match        *://*.eclinicalweb.com/*
 // @match        https://*.com/mobiledoc/jsp/webemr/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        unsafeWindow
+// @connect      raw.githubusercontent.com
+// @sandbox      JavaScript
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/FarhanKaB/ecw-pilot/main/loader/ECW_Pilot.user.js
 // @downloadURL  https://raw.githubusercontent.com/FarhanKaB/ecw-pilot/main/loader/ECW_Pilot.user.js
@@ -24,7 +29,12 @@
       6. checks for a newer version every 20 minutes (only while the tab is
          visible) and tells the panel, which shows "refresh to update".
     Files are only downloaded again when their version in manifest.json
-    goes up — so a normal page load downloads just the small manifest.     */
+    goes up — so a normal page load downloads just the small manifest.
+
+    v1.1: eCW's security policy (connect-src) blocks the page from
+    contacting GitHub, so downloads go through Tampermonkey
+    (GM_xmlhttpRequest), which that policy doesn't cover. Downloaded
+    files are saved in Tampermonkey's storage and still run in the page.  */
 
 (function () {
     'use strict';
@@ -33,15 +43,16 @@
     const REPO_ROOT = 'https://raw.githubusercontent.com/FarhanKaB/ecw-pilot/';
     // ==============================================================
 
-    const LOADER_VERSION = '1.0';
+    const LOADER_VERSION = '1.1';
+    const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
     const CHECK_EVERY_MIN = 20;
     const FETCH_TIMEOUT_MS = 10000;
 
-    if (window.top !== window.self) return;     // top page only, never inside frames
-    if (window.ECWPilot) return;                // one loader per page
+    if (PAGE.top !== PAGE.self) return;         // top page only, never inside frames
+    if (PAGE.ECWPilot) return;                  // one loader per page
 
     // Testers: localStorage.setItem('ecwpilot:branch', 'beta') then refresh.
-    const BRANCH = safeGet('ecwpilot:branch') || 'main';
+    const BRANCH = pageLS('ecwpilot:branch') || 'main';
     const REPO = REPO_ROOT + BRANCH + '/';
 
     const SETTINGS_KEY = 'ecwpilot:settings';
@@ -49,18 +60,23 @@
     const SEEN_KEY = 'ecwpilot:seen';
     const MANIFEST_CACHE = 'ecwpilot:manifest';
 
-    function safeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
-    function safeSet(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } }
+    // Tester switches set from the console (localStorage of the eCW page).
+    function pageLS(k) { try { return PAGE.localStorage.getItem(k); } catch (e) { return null; } }
+    function safeGet(k) { try { const v = GM_getValue(k, null); return v == null ? null : v; } catch (e) { return null; } }
+    function safeSet(k, v) { try { GM_setValue(k, v); return true; } catch (e) { return false; } }
     function readJSON(k, fallback) { try { const v = safeGet(k); return v ? JSON.parse(v) : fallback; } catch (e) { return fallback; } }
 
-    async function fetchText(url) {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-        try {
-            const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            return await res.text();
-        } finally { clearTimeout(timer); }
+    // Downloads through Tampermonkey — eCW's page policy blocks fetch() to GitHub.
+    function fetchText(url) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET', url, timeout: FETCH_TIMEOUT_MS,
+                headers: { 'Cache-Control': 'no-cache' },
+                onload: r => (r.status >= 200 && r.status < 300) ? resolve(r.responseText) : reject(new Error('HTTP ' + r.status)),
+                onerror: () => reject(new Error('network error')),
+                ontimeout: () => reject(new Error('timed out'))
+            });
+        });
     }
 
     async function getManifest(fresh) {
@@ -78,7 +94,7 @@
 
     function findClient(manifest) {
         const host = location.hostname.toLowerCase();
-        const forced = safeGet('ecwpilot:client');
+        const forced = pageLS('ecwpilot:client');
         for (const [id, c] of Object.entries(manifest.clients || {})) {
             if (forced ? forced === id : (c.hosts || []).some(h => host === h.toLowerCase())) return Object.assign({ id }, c);
         }
@@ -117,7 +133,8 @@
         // Runs in the page, the same way the files would run as their own
         // @grant none userscripts. `window` and `ECWPilot` are passed in.
         try {
-            new Function('window', 'ECWPilot', code + '\n//# sourceURL=ecw-pilot/' + label + '.js')(window, window.ECWPilot);
+            const PageFunction = PAGE.Function || Function;   // page's own Function: globals resolve in the page
+            PageFunction('window', 'ECWPilot', code + '\n//# sourceURL=ecw-pilot/' + label + '.js')(PAGE, PAGE.ECWPilot);
             return true;
         } catch (e) {
             console.error('ECW Pilot: ' + label + ' failed to start', e);
@@ -183,7 +200,7 @@
             return true;
         }
 
-        window.ECWPilot = {
+        PAGE.ECWPilot = {
             loaderVersion: LOADER_VERSION,
             branch: BRANCH,
             client: { id: client.id, name: client.name || client.id },
@@ -213,14 +230,14 @@
         // Newer version on GitHub? Check every CHECK_EVERY_MIN minutes,
         // only while the tab is visible; the manifest is a tiny file.
         setInterval(async () => {
-            if (document.hidden || window.ECWPilot.updateAvailable) return;
+            if (document.hidden || PAGE.ECWPilot.updateAvailable) return;
             const fresh = await getManifest(true);
             if (!fresh) return;
             const freshFiles = fileTable(fresh, findClient(fresh));
             const newer = [...loaded].some(k => freshFiles[k] && freshFiles[k].version !== files[k].version);
             if (newer) {
-                window.ECWPilot.updateAvailable = true;
-                window.dispatchEvent(new Event('ecwpilot:update-available'));
+                PAGE.ECWPilot.updateAvailable = true;
+                PAGE.dispatchEvent(new PAGE.Event('ecwpilot:update-available'));
             }
         }, CHECK_EVERY_MIN * 60 * 1000);
     })();

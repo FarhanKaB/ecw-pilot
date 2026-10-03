@@ -266,6 +266,9 @@
         #smcPanel .smc-row.add input { accent-color: var(--smc-add); }
         #smcPanel .smc-row.add.off { background: transparent; }
         #smcPanel .smc-row.add.off .smc-code > b, #smcPanel .smc-row.add.off .smc-why { color: var(--smc-ink-3); }
+        /* primary diagnosis: gold tag + gold bar on the row's left edge */
+        #smcPanel .smc-row.primary { box-shadow: inset 3px 0 0 #c9a227; }
+        #smcPanel .smc-tag.smc-prim { background: #fbf1cf; color: #7a5c00; font-weight: 700; letter-spacing: .3px; border: 1px solid #e8d48a; }
         #smcPanel .smc-row.review .smc-why { color: var(--smc-warn); font-weight: 600; }
         #smcPanel .smc-result-sum { margin-top: 3px; font-weight: 600; }
         #smcPanel .smc-review-head { margin: 12px 18px 0; font-size: 12px; color: var(--smc-ink-2); }
@@ -4064,10 +4067,10 @@
         if (!smartSortOn()) return false;
         const sc = getBillingScope();
         if (!sc) return false;
-        const sig = chartCodeSig() + '|' + JSON.stringify([...currentModifiers()]);
+        const sig = chartCodeSig() + '|' + JSON.stringify([...currentModifiers()]) + '|' + livePrimaryCode();
         if (sig === smartTriedSig) return false;
         const icd = sc.icdData || [];
-        const noPrimary = icd.length && !icd.some(r => r && String(r.isPrimaryAsmt) === '1') &&
+        const noPrimary = icd.length && !(PILOT.smartSort.hasPrimary ? PILOT.smartSort.hasPrimary() : icd.some(r => r && String(r.isPrimaryAsmt) === '1')) &&
             icd.some(r => r && PILOT.smartSort.isPrimaryAllowedICD(r.medicalcode));
         const mods = currentModifiers();
         const codes = [...mods.keys()];
@@ -4088,7 +4091,7 @@
     }
     function reviewActive() {
         if (!reviewState || !hasBillingGrids()) return false;
-        if (chartCodeSig() !== reviewState.sig || pendingChangeCount() > 0) { reviewState = null; return false; }
+        if (chartCodeSig() !== reviewState.sig || pendingChangeCount() > 0 || smartTidyNeeded()) { reviewState = null; return false; }
         return true;
     }
 
@@ -4312,7 +4315,7 @@
         let order, smart = null;
         if (smartSortOn()) {
             setBusyStatus('Smart Sort: ordering, primary diagnosis, modifiers…', 1);
-            try { smart = PILOT.smartSort.run(); } catch (e) { console.error('ECW Pilot: Smart Sort failed', e); }
+            try { smart = await PILOT.smartSort.run(); } catch (e) { console.error('ECW Pilot: Smart Sort failed', e); }
             await ecwApiSleep(600);
             order = smart && smart.ok ? { ok: true } : { ok: false, message: 'Smart Sort could not reach the Billing grids — codes were not re-ordered' };
         } else {
@@ -4330,11 +4333,14 @@
             try { linked = PILOT.linkNow(); } catch (e) { console.error('ECW Pilot: linking after Add to EMR failed', e); }
         }
 
-        smartTriedSig = chartCodeSig() + '|' + JSON.stringify([...currentModifiers()]);
+        smartTriedSig = chartCodeSig() + '|' + JSON.stringify([...currentModifiers()]) + '|' + livePrimaryCode();
         const fails = actionLog.filter(e => e.status === 'fail');
         const done = actionLog.length - fails.length;
         const lines = fails.map(f => `${f.code} — could not ${f.action === 'add' ? 'add' : 'remove'}${f.message ? `: ${f.message}` : ''}`);
         if (!order.ok) lines.push(order.message);
+        if (smart && smart.primary && !smart.primary.set && !smart.primary.already && smart.primary.reason) {
+            lines.push(`Primary diagnosis not set: ${smart.primary.reason}`);
+        }
         if (apiMissing.length) lines.push(`eCW Billing method unavailable (missing: ${apiMissing.join(', ')}) — codes were typed in the old way, and E&M codes went through the E&M picker. Run smcDiagnose() in the console for details.`);
         reviewState = { icd: beforeSnapshot.icd, cpt: beforeSnapshot.cpt, at: new Date(), sig: chartCodeSig() };
         const afterIcd = new Set(readCurrentICD().map(x => x.code)), afterCpt = new Set(readCurrentCPT().map(x => x.code));
@@ -4367,20 +4373,66 @@
     }
 
     // ====================== RENDER: CODING ======================
-    function currentColumnHtml(current, dels) {
+    // ---- Primary diagnosis marker ----
+    // Live primary = eCW's primaryArr (what the ★ shows); the saved
+    // isPrimaryAsmt flag only if eCW has no primaryArr.
+    function livePrimaryCode() {
+        const ng = pageGlobal('angular');
+        const el = document.querySelector('#billingTbl2');
+        if (!el || !ng || !ng.element) return '';
+        let sc = null;
+        try { sc = ng.element(el).scope(); } catch (e) { return ''; }
+        while (sc && !Array.isArray(sc.icdData)) sc = sc.$parent;
+        if (!sc) return '';
+        let p = sc;
+        while (p && !Array.isArray(p.primaryArr)) p = p.$parent;
+        const codes = sc.icdData.map(r => String(r && r.medicalcode || '').trim().toUpperCase());
+        if (p) return p.primaryArr.map(c => String(c || '').trim().toUpperCase()).find(c => codes.includes(c)) || '';
+        const f = sc.icdData.find(r => r && String(r.isPrimaryAsmt) === '1');
+        return f ? String(f.medicalcode || '').trim().toUpperCase() : '';
+    }
+    // Which diagnosis will be primary after the ticked changes:
+    //  - the current one, if it stays;
+    //  - if it's removed, eCW moves primary to the next diagnosis after it;
+    //  - none at all + Smart Sort on → the one Smart Sort will pick.
+    function predictedPrimary(current, adds, dels) {
+        const live = livePrimaryCode();
+        const delSet = new Set(dels.filter(d => isPicked('d', d)).map(d => d.code.toUpperCase()));
+        if (live && !delSet.has(live)) return { code: live, will: false };
+        if (live) {
+            const i = current.findIndex(x => x.code === live);
+            const next = current.slice(i + 1).find(x => !delSet.has(x.code));
+            if (next) return { code: next.code, will: true, why: `${live} is removed — eCW moves primary to the next diagnosis` };
+        }
+        if (smartSortOn()) {
+            const finalList = orderItems([
+                ...current.filter(x => !delSet.has(x.code)),
+                ...adds.filter(a => isPicked('a', a)).map(a => ({ code: a.code.toUpperCase() }))
+            ], 'icd');
+            const pick = finalList.find(x => PILOT.smartSort.isPrimaryAllowedICD(x.code));
+            if (pick) return { code: pick.code, will: true, why: 'No primary set — Smart Sort sets it at Add to EMR' };
+        }
+        return null;
+    }
+    const primaryTag = (will, why) => `<span class="smc-tag smc-prim" title="${escapeHtml(why || 'Primary diagnosis')}">PRIMARY${will ? ' · will be set' : ''}</span>`;
+
+    function currentColumnHtml(current, dels, isIcd) {
+        const prim = isIcd ? livePrimaryCode() : '';
         if (!current.length) return `<div class="smc-empty">None on the chart</div>`;
         const delMap = new Map(dels.map(d => [d.code.toUpperCase(), d]));
         return current.map((x, i) => {
             const d = delMap.get(x.code);
             const units = x.units && x.units !== 1 ? `<span class="smc-tag">× ${x.units}</span>` : '';
+            const isPrim = !!prim && x.code === prim;
+            const pTag = isPrim ? primaryTag(false) : '';
             if (!d) {
-                return `<div class="smc-row"><span class="mk"><span class="smc-num">${i + 1}</span></span>
-                    <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}</div><div class="smc-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</div></div></div>`;
+                return `<div class="smc-row ${isPrim ? 'primary' : ''}"><span class="mk"><span class="smc-num">${i + 1}</span></span>
+                    <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}${pTag}</div><div class="smc-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</div></div></div>`;
             }
             const on = isPicked('d', d);
-            return `<label class="smc-row del ${on ? '' : 'off'}" title="${escapeHtml(d.reason)}">
+            return `<label class="smc-row del ${on ? '' : 'off'} ${isPrim ? 'primary' : ''}" title="${escapeHtml(d.reason)}">
                 <span class="mk"><input type="checkbox" data-k="${escapeHtml(keyOf('d', x.code))}" ${on ? 'checked' : ''} aria-label="Remove ${escapeHtml(x.code)}"></span>
-                <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}</div><div class="smc-name">${escapeHtml(x.name)}</div>
+                <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}${pTag}</div><div class="smc-name">${escapeHtml(x.name)}</div>
                 <div class="smc-why">${on ? 'Remove — ' : 'Keeping — '}${escapeHtml(d.reason)}</div></div></label>`;
         }).join('');
     }
@@ -4393,13 +4445,16 @@
             ...adds.map(a => Object.assign({}, a, { t: 'add', isUpdate: current.some(x => x.code === a.code.toUpperCase()) }))
         ], rank === icdRank ? 'icd' : 'cpt');
         if (!items.length) return `<div class="smc-empty">Nothing left</div>`;
+        const pred = rank === icdRank ? predictedPrimary(current, adds, dels) : null;
+        const pTagFor = code => (pred && pred.code === code ? primaryTag(pred.will, pred.why) : '');
+        const pCls = code => (pred && pred.code === code ? 'primary' : '');
         let n = 0;
         return items.map(x => {
             if (x.t === 'kept') {
                 n++;
                 const units = x.units && x.units !== 1 ? `<span class="smc-tag">× ${x.units}</span>` : '';
-                return `<div class="smc-row"><span class="mk"><span class="smc-num">${n}</span></span>
-                    <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}</div><div class="smc-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</div></div></div>`;
+                return `<div class="smc-row ${pCls(x.code)}"><span class="mk"><span class="smc-num">${n}</span></span>
+                    <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}${pTagFor(x.code)}</div><div class="smc-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</div></div></div>`;
             }
             const on = isPicked('a', x);
             if (on) n++;
@@ -4415,9 +4470,9 @@
             const nameLine = billingName
                 ? `<div class="smc-name" title="${escapeHtml(billingName)}">${escapeHtml(billingName)}</div>`
                 : '';
-            return `<label class="smc-row add ${on ? '' : 'off'} ${x.needsReview ? 'review' : ''}" title="${escapeHtml(billingName ? billingName + ' — ' + x.reason : x.reason)}">
+            return `<label class="smc-row add ${on ? '' : 'off'} ${x.needsReview ? 'review' : ''} ${pCls(code)}" title="${escapeHtml(billingName ? billingName + ' — ' + x.reason : x.reason)}">
                 <span class="mk"><input type="checkbox" data-k="${escapeHtml(keyOf('a', x.code))}" ${on ? 'checked' : ''} aria-label="Add ${escapeHtml(x.code)}"></span>
-                <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${tags}</div>${nameLine}
+                <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${tags}${pTagFor(code)}</div>${nameLine}
                 <div class="smc-why">${escapeHtml(x.reason)}</div></div></label>`;
         }).join('');
     }
@@ -4443,7 +4498,7 @@
         return `<div class="smc-block">
             <div class="smc-block-head"><h2>${title}</h2><span class="smc-sum">${sumHtml(adds, dels, orderFix)}</span></div>
             <div class="smc-diff">
-                <div class="smc-col"><div class="smc-col-h">Current <span>${current.length}</span></div>${currentColumnHtml(current, dels)}</div>
+                <div class="smc-col"><div class="smc-col-h">Current <span>${current.length}</span></div>${currentColumnHtml(current, dels, rank === icdRank)}</div>
                 <div class="smc-col"><div class="smc-col-h">After changes <span>${afterCount(current, adds, dels)}</span></div>${afterColumnHtml(current, adds, dels, rank)}</div>
             </div>${extra || ''}
         </div>`;
@@ -5238,6 +5293,21 @@
         EXTERNAL_TAB_BUTTONS.forEach(({ id, order }) => {
             const btn = document.getElementById(id);
             if (!btn) return;
+            // Link (ECW Pilot's own): lives only inside the panel and shows only
+            // while the Billing grids are on screen — never floating on the page.
+            if (id === 'ecwLinkBtnNoDelete' && PILOT) {
+                const home = panel ? panel.querySelector('.smc-tabs') : null;
+                if (home && btn.parentElement !== home) {
+                    home.appendChild(btn);
+                    Object.assign(btn.style, {
+                        position: 'static', top: '', left: '', right: '', zIndex: '', order: String(order),
+                        alignSelf: 'center', margin: '0 0 3px', padding: '4px 10px',
+                        fontSize: '12px', fontWeight: '600', borderRadius: '6px', boxShadow: 'none'
+                    });
+                }
+                btn.style.display = home && isPanelOpen() && hasBillingGrids() ? '' : 'none';
+                return;
+            }
             if (tabs) {
                 if (btn.parentElement === tabs) return;
                 if (btn.dataset.smcOrigStyle === undefined) btn.dataset.smcOrigStyle = btn.getAttribute('style') || '';

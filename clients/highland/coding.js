@@ -23,6 +23,21 @@
     const SCRIPT_VERSION = (PILOT && PILOT.versionOf && PILOT.versionOf('coding')) || '1.0';
     const CLIENT_NAME = (PILOT && PILOT.client && PILOT.client.name) || 'HighLand';
 
+    // ====================== EXCLUDED CODES (edit per client) ======================
+    // Codes listed here are NEVER added or removed by ECW Pilot — not by the
+    // rules, not by PV / P-C / SM / OB, not by Add to EMR. Whatever is on the
+    // chart stays; nothing new is proposed. Example: 'Z68.1', '99051'.
+    const EXCLUDE_ICD = [
+    ];
+    const EXCLUDE_CPT = [
+    ];
+    const EXCLUDED_ICD_SET = new Set(EXCLUDE_ICD.map(c => String(c).trim().toUpperCase()));
+    const EXCLUDED_CPT_SET = new Set(EXCLUDE_CPT.map(c => String(c).trim().toUpperCase()));
+    function isExcludedCode(item) {
+        const c = String(item && item.code || '').trim().toUpperCase();
+        return item && item.kind === 'icd' ? EXCLUDED_ICD_SET.has(c) : EXCLUDED_CPT_SET.has(c);
+    }
+
     // ====================== SCREENING PILLS (edit per client) ======================
     // One line per pill, shown in this order under BP/BMI. `source` is the
     // screening the note is read for: alcohol, depression, smoking,
@@ -108,6 +123,13 @@
         #smcPanel .smc-menu-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 14px; font-size: 12.5px; cursor: pointer; margin: 0; font-weight: 500; }
         #smcPanel .smc-menu-row:hover { background: var(--smc-sunk); }
         #smcPanel .smc-menu-row .smc-switch input:disabled + .track { opacity: .4; }
+        #smcPanel .smc-menu-link { cursor: default; }
+        #smcPanel .smc-seg { display: inline-flex; border: 1px solid var(--smc-line); border-radius: 7px; overflow: hidden; }
+        #smcPanel .smc-seg button { border: 0; background: var(--smc-surface); color: var(--smc-ink-2); font-size: 11.5px; font-weight: 600; padding: 4px 8px; cursor: pointer; }
+        #smcPanel .smc-seg button + button { border-left: 1px solid var(--smc-line); }
+        #smcPanel .smc-seg button.on { background: var(--smc-brand); color: #fff; }
+        #smcPanel .smc-seg button:disabled { opacity: .45; cursor: not-allowed; }
+        #smcPanel .smc-menu { width: 250px; }
         #smcPanel .smc-menu-note { padding: 0 14px; font-size: 11px; color: var(--smc-ink-3); min-height: 0; }
         #smcPanel .smc-menu-note:not(:empty) { padding: 4px 14px 2px; }
         #smcPanel .smc-menu-sep { height: 1px; background: var(--smc-line-2); margin: 6px 0; }
@@ -257,6 +279,12 @@
         #smcPanel .smc-rules summary { cursor: pointer; color: var(--smc-ink-2); font-weight: 600; }
         #smcPanel .smc-rules p { margin: 6px 0 0; }
         #smcPanel .smc-rules ol { margin: 6px 0 2px; padding-left: 20px; columns: 2; column-gap: 20px; }
+        #smcPanel .smc-mods { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--smc-line); border-radius: 10px; overflow: hidden; background: var(--smc-surface); font-size: 12.5px; margin-bottom: 8px; }
+        #smcPanel .smc-mods th { text-align: left; padding: 7px 10px; font-size: 11.5px; font-weight: 600; color: var(--smc-ink-2); background: var(--smc-sunk); border-bottom: 1px solid var(--smc-line); }
+        #smcPanel .smc-mods td { padding: 7px 10px; border-bottom: 1px solid var(--smc-line-2); font-family: var(--smc-mono); vertical-align: top; }
+        #smcPanel .smc-mods tr:last-child td { border-bottom: 0; }
+        #smcPanel .smc-mods th:first-child, #smcPanel .smc-mods td.smc-mod { width: 96px; font-weight: 700; }
+        #smcPanel .smc-mods td.smc-empty { font-family: var(--smc-sans); }
         #smcPanel .smc-blank { padding: 28px 18px; color: var(--smc-ink-3); text-align: center; line-height: 1.5; }
         #smcPanel .smc-blank b { color: var(--smc-ink-2); }
 
@@ -1449,227 +1477,63 @@
         return false;
     }
 
-    function waitUntilGoneCPT(getter, timeout, callback) {
+    // ====================== REMOVE WITHOUT eCW's WARNING (v1.5) ======================
+    // eCW's delete buttons call removeData(index, 'icd' | 'cpt').
+    //  - ICD: removeData has a deleteWithoutConfirming option. With it, eCW
+    //    skips the "Are you sure?" balloon and runs its full removal itself
+    //    (form lock, associated CPTs, primary moved to the next diagnosis,
+    //    splice, row renumbering).
+    //  - CPT: the warning's Yes button runs removeCpt(index) — called directly.
+    // A code whose delete button eCW has disabled (no permission, or a CPT
+    // mapped in Patient Tracking) is never removed. There is no click-and-Yes
+    // fallback any more (removed in v1.5).
+    function findBillingFnScope(tableSel, fnName) {
+        const ng = pageGlobal('angular');
+        const el = document.querySelector(`${tableSel} tbody tr[ng-repeat]`) || document.querySelector(tableSel);
+        if (!el || !ng || !ng.element) return null;
+        let sc = null;
+        try { sc = ng.element(el).scope(); } catch (e) { return null; }
+        while (sc && typeof sc[fnName] !== 'function') sc = sc.$parent;
+        return sc || null;
+    }
+    function deleteButtonBlocked(tableSel, index) {
+        const tr = document.querySelectorAll(`${tableSel} tbody tr[ng-repeat]`)[index];
+        const btn = tr && tr.querySelector('.blue-delete, i.blue-delete, button');
+        return !!(btn && (btn.classList.contains('disabledDeleteButton') || btn.classList.contains('per')));
+    }
+    async function waitUntilCodeGone(kind, code, timeoutMs) {
         const start = Date.now();
-        const timer = setInterval(() => {
-            if (!getter()) { clearInterval(timer); setTimeout(() => callback(true), 200); return; }
-            if (Date.now() - start > timeout) { clearInterval(timer); callback(false); }
-        }, 100);
+        while (Date.now() - start < timeoutMs) {
+            const sc = getBillingScope();
+            const inScope = kind === 'icd' ? (sc && ecwScopeHasICD(sc, code)) : (sc && ecwScopeHasCPT(sc, code));
+            const inGrid = kind === 'icd' ? !!findICDRowByCodeFast(code) : !!getCPTRowByCode(code);
+            if (!inScope && !inGrid) return true;
+            await ecwApiSleep(150);
+        }
+        return false;
     }
-
-    // Deletion mechanism ported directly from the verified, working
-    // Auto_link_for_GetWell script — same selectors, same confirm-dialog
-    // handling, same "wait until gone" polling, for both the CPT grid and
-    // (newly, for the quick-action cleanup below) the ICD grid.
-    function deleteOneCPTRow(row, expectedCode, callback) {
-        if (!row || !document.body.contains(row)) { callback({ ok: true }); return; }
-
-        // eCW's ng-repeat uses "track by $index" — if the grid changed since
-        // this row reference was captured, Angular can silently reuse this
-        // same DOM node for a DIFFERENT CPT row. Re-verify it still holds
-        // the code we actually mean to delete before touching anything; if
-        // not, re-find the right row by code instead of deleting whatever's
-        // sitting here now.
-        let actualCode = row.querySelector('td:nth-child(2)')?.textContent.trim();
-        if (expectedCode && actualCode && actualCode.toUpperCase() !== expectedCode.toUpperCase()) {
-            const freshRow = getCPTRowByCode(expectedCode);
-            if (!freshRow) { callback({ ok: false, mismatched: true }); return; }
-            row = freshRow;
+    // { ok, blocked, unavailable }
+    async function ecwRemoveCodeNoWarning(kind, code) {
+        code = String(code).trim().toUpperCase();
+        const tableSel = kind === 'icd' ? '#billingTbl2' : '#billingTbl4';
+        const fnName = kind === 'icd' ? 'removeData' : 'removeCpt';
+        const sc = findBillingFnScope(tableSel, fnName);
+        const list = sc && (kind === 'icd' ? sc.icdData : sc.cptData);
+        if (!sc || !Array.isArray(list)) return { ok: false, unavailable: true };
+        const index = list.findIndex(x => x && String((kind === 'icd' ? x.medicalcode : x.code) || '').trim().toUpperCase() === code);
+        if (index === -1) return { ok: true };                      // already gone
+        if (deleteButtonBlocked(tableSel, index)) return { ok: false, blocked: true };
+        try {
+            ecwSafeApply(sc, () => {
+                if (kind === 'icd') sc.removeData(index, 'icd', null, true);
+                else sc.removeCpt(index);
+            });
+        } catch (e) {
+            console.warn(`ECW Pilot: eCW remove of ${code} failed`, e);
+            return { ok: false, unavailable: true };
         }
-
-        const code = row.querySelector('td:nth-child(2)')?.textContent.trim();
-        const delBtn = row.querySelector('button, i.blue-delete, .blue-delete');
-        if (!delBtn) { callback({ ok: false }); return; }
-
-        // Disabled via ng-class when cptMappedInPT==='true' (mapped/tracked
-        // elsewhere in eCW) — clicking does nothing, no confirm dialog ever
-        // appears. Fail immediately instead of waiting out a timeout.
-        if (delBtn.classList.contains('disabledDeleteButton') || delBtn.classList.contains('per')) {
-            callback({ ok: false, blocked: true });
-            return;
-        }
-
-        // If a confirm dialog from a PREVIOUS delete is still sitting open
-        // (its poll window ran out before eCW finished rendering it), its
-        // backdrop blocks every click on the page — including the one
-        // we're about to make — which is exactly what "stuck" looks like.
-        // Clear it first (best-effort, harmless no-op if nothing's open).
-        clickAnyYesButton();
-
-        delBtn.click();
-        const start = Date.now();
-        const confirmTimer = setInterval(() => {
-            if (clickAnyYesButton()) {
-                clearInterval(confirmTimer);
-                waitUntilGoneCPT(() => {
-                    return getCPTRows().find(r =>
-                        r.querySelector('td:nth-child(2)')?.textContent.trim() === code
-                    );
-                }, 6000, (gone) => callback({ ok: gone }));
-                return;
-            }
-            if (Date.now() - start > 6000) {
-                clearInterval(confirmTimer);
-                callback({ ok: false });
-            }
-        }, 100);
-    }
-
-    function deleteOneICDRow(row, expectedCode, callback) {
-        if (!row || !document.body.contains(row)) {
-            // BUG FIX: a detached/stale row reference does NOT mean the
-            // ICD is already gone — it usually means Angular re-rendered
-            // the grid (e.g. an earlier CPT/ICD delete in this same
-            // applyAnalysis batch caused a re-render), leaving our
-            // captured DOM node orphaned while the ICD is still sitting
-            // on the chart under a NEW row node. Report success without
-            // deleting only if the code is genuinely not there anymore in
-            // the CURRENT grid.
-            if (expectedCode) {
-                const entry = getICDRows().find(r => r.code.toUpperCase() === expectedCode.toUpperCase());
-                if (entry) { row = entry.row; }
-                else { callback(true); return; }
-            } else {
-                callback(true);
-                return;
-            }
-        }
-
-        // Same reuse risk as the CPT grid — re-verify before deleting.
-        let actualCode = row.querySelector('td:nth-child(3)')?.textContent.trim();
-        if (expectedCode && actualCode && actualCode.toUpperCase() !== expectedCode.toUpperCase()) {
-            const entry = getICDRows().find(r => r.code.toUpperCase() === expectedCode.toUpperCase());
-            if (!entry) { callback(false); return; }
-            row = entry.row;
-        }
-
-        const code = row.querySelector('td:nth-child(3)')?.textContent.trim();
-        const delBtn = row.querySelector('button, i.blue-delete, .blue-delete');
-        if (!delBtn) { callback(false); return; }
-
-        // If a confirm dialog from a PREVIOUS delete is still sitting open
-        // (its poll window ran out before eCW finished rendering it), its
-        // backdrop blocks every click on the page — including the one
-        // we're about to make — which is exactly what "stuck" looks like.
-        // Clear it first (best-effort, harmless no-op if nothing's open).
-        clickAnyYesButton();
-
-        delBtn.click();
-        const start = Date.now();
-        const confirmTimer = setInterval(() => {
-            if (clickAnyYesButton()) {
-                clearInterval(confirmTimer);
-                waitUntilGoneCPT(() => {
-                    return getICDRows().find(r => r.code === code);
-                }, 6000, callback);
-                return;
-            }
-            if (Date.now() - start > 6000) {
-                clearInterval(confirmTimer);
-                callback(false);
-            }
-        }, 100);
-    }
-
-    // Some ICD deletes visually succeed (row vanishes, confirm click
-    // worked) but bounce back a moment later — eCW's backend hadn't
-    // actually committed the delete yet when something else (usually the
-    // next add/delete in the same run) touched the grid and it
-    // re-rendered from a not-yet-updated list. Retry the delete itself a
-    // few times with an increasing settle wait after each attempt,
-    // re-reading the row fresh each time (never reusing a stale DOM
-    // reference across attempts).
-    async function deleteICDRowWithRetry(code, maxAttempts = 4) {
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
-            if (!entry) return { ok: true }; // already gone (or never there)
-
-            const clicked = await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
-            if (!clicked) {
-                await new Promise(r => setTimeout(r, 500));
-                continue;
-            }
-
-            // Fast path: deleteOneICDRow already waited for the row to
-            // leave the DOM, so a normal, working delete confirms and
-            // returns here immediately — no added delay. Only a code that
-            // ACTUALLY bounces back pays an extra wait, and only on the
-            // retry after that happens (900ms, 1600ms, 2300ms), giving
-            // eCW's backend a little more time to commit before checking
-            // again.
-            if (!findICDRowByCodeFast(code)) return { ok: true };
-            if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 200 + attempt * 700));
-            // Still there (or back) — loop and try again.
-        }
-        return { ok: false };
-    }
-
-    // Deletes any of the given ICD codes that are currently on the grid.
-    // Used by the quick-action buttons to clean up codes that belong to a
-    // *different* quick action (e.g. Preventive's Z00.01/Z00.121 shouldn't
-    // linger after running Preventive Counseling instead).
-    async function deleteICDCodesByCode(codes) {
-        for (const code of codes) {
-            const entry = getICDRows().find(r => r.code.toUpperCase() === code.toUpperCase());
-            if (!entry) continue;
-            await new Promise(resolve => deleteOneICDRow(entry.row, code, resolve));
-        }
-    }
-
-    // Deletes any of the given CPT codes that are currently on the grid.
-    // Same purpose as deleteICDCodesByCode above, for the CPT side (e.g.
-    // Preventive Counseling's 99401 shouldn't linger after running
-    // Preventive instead).
-    async function deleteCPTCodesByCode(codes) {
-        for (const code of codes) {
-            const row = getCPTRowByCode(code);
-            if (!row) continue;
-            await new Promise(resolve => deleteOneCPTRow(row, code, resolve));
-        }
-    }
-
-    // Mutual exclusivity across the 4 quick actions (PV/P-C/SM/OB): only
-    // one's bundle should be on the chart at a time. Call with the action
-    // that's currently running ('pv'/'pc'/'sm'/'ob') — clears the OTHER
-    // three's bundles, never the diagnosis codes that stand on their own:
-    //  - PV bundle:  993xx E&M + Medicare AWV G-codes + Z00.01/Z00.121,
-    //                plus Z71.3/Z71.82/Z71.89 (shared with P/C below).
-    //  - P/C bundle: 99401 (Z71.3/82/89 already covered above, since PV
-    //                and P/C use the exact same counseling Z-codes).
-    //  - SM bundle:  99406 ONLY — never F17.210 (that's a real diagnosis).
-    //  - OB bundle:  G0447 ONLY — never E66.9 (a real diagnosis).
-    // BMI (Z68.xx): PV and OB both need it, so it's left alone when either
-    // of those is the one running. P/C and SM don't use BMI at all, so
-    // when either of THOSE runs, any leftover Z68.xx (from a prior PV/OB
-    // run) gets cleared too.
-    async function deleteAllBMIZ68Codes() {
-        let entry;
-        while ((entry = getICDRows().find(r => /^Z68\./i.test(r.code)))) {
-            await new Promise(resolve => deleteOneICDRow(entry.row, entry.code, resolve));
-        }
-    }
-
-    async function clearOtherQuickActionBundles(current) {
-        if (current !== 'pv') {
-            await deleteCPTCodesByCode(ALL_PREVENTIVE_EM_CODES);
-            await deleteCPTCodesByCode(MEDICARE_AWV_CODES);
-            await deleteICDCodesByCode(["Z00.01", "Z00.121"]);
-        }
-        if (current !== 'pv' && current !== 'pc') {
-            await deleteICDCodesByCode(["Z71.3", "Z71.82", "Z71.89"]);
-        }
-        if (current !== 'pc') {
-            await deleteCPTCodesByCode(["99401"]);
-        }
-        if (current !== 'sm') {
-            await deleteCPTCodesByCode(["99406"]);
-        }
-        if (current !== 'ob') {
-            await deleteCPTCodesByCode(["G0447"]);
-        }
-        if (current !== 'pv' && current !== 'ob') {
-            await deleteAllBMIZ68Codes();
-        }
+        // ICD removal waits on eCW's form lock, so give it a moment.
+        return { ok: await waitUntilCodeGone(kind, code, 6000) };
     }
 
     // The visible #CPTCode box (eCW's markup can have more than one element
@@ -2580,19 +2444,8 @@
             });
         }
 
-        // ---- CPT codes starting with '8' → delete + add Z13.88 ----
-        const eightPrefixRows = currentRows.filter(r => /^8/.test(r.code));
-        eightPrefixRows.forEach(r => {
-            if (!toDelete.some(d => d.code === r.code)) {
-                toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: "CPT code starting with '8' — not applicable, removed" });
-            }
-        });
-        if (eightPrefixRows.length) {
-            const currentICDCodesFor8 = getICDRows().map(e => e.code.toUpperCase());
-            if (!currentICDCodesFor8.includes('Z13.88')) {
-                toAdd.push({ code: 'Z13.88', reason: "CPT code starting with '8' removed — add Z13.88", kind: 'icd' });
-            }
-        }
+        // (v1.4: the old "CPT starting with 8 → remove it and add Z13.88" rule
+        // is gone — 8-series codes such as labs stay on the chart.)
 
         // ---- 99173 (visual acuity) ----
         // Preventive visit + no eye ICD -> delete 99173. Not preventive +
@@ -4183,8 +4036,50 @@
     // Code set whose ordering Add to EMR already tried; a leftover order
     // difference on that same set never re-enables the button on its own.
     let reorderTriedSig = '';
+    // ---- Smart Sort (shared/sort.js) and Link (link.js) hooks ----
+    function smartSortOn() {
+        return !!(PILOT && PILOT.isEnabled && PILOT.isEnabled('sort') && PILOT.smartSort);
+    }
+    function linkOn() {
+        return !!(PILOT && PILOT.linkMode && PILOT.linkMode() !== 'off');
+    }
+    // Order a list of {code} items the way the chart will be ordered:
+    // Smart Sort's lists when it's on, the basic ranks otherwise.
+    function orderItems(list, kind) {
+        if (smartSortOn()) {
+            const fn = kind === 'icd' ? PILOT.smartSort.orderICDCodes : PILOT.smartSort.orderCPTCodes;
+            const order = fn(list.map(x => x.code));
+            const pool = list.slice();
+            return order.map(c => { const i = pool.findIndex(x => x.code === c); return pool.splice(i, 1)[0]; });
+        }
+        return sortByRank(list, kind === 'icd' ? icdRank : cptRank);
+    }
+    function isInOrder(list, kind) {
+        if (smartSortOn()) return orderItems(list, kind).every((x, i) => x === list[i]);
+        return isOrdered(list, kind === 'icd' ? icdRank : cptRank);
+    }
+
+    // Smart Sort: primary diagnosis missing, or modifiers not as planned?
+    function smartTidyNeeded() {
+        if (!smartSortOn()) return false;
+        const sc = getBillingScope();
+        if (!sc) return false;
+        const sig = chartCodeSig() + '|' + JSON.stringify([...currentModifiers()]);
+        if (sig === smartTriedSig) return false;
+        const icd = sc.icdData || [];
+        const noPrimary = icd.length && !icd.some(r => r && String(r.isPrimaryAsmt) === '1') &&
+            icd.some(r => r && PILOT.smartSort.isPrimaryAllowedICD(r.medicalcode));
+        const mods = currentModifiers();
+        const codes = [...mods.keys()];
+        const plan = PILOT.smartSort.planModifiers(codes.map(c => ({ code: c, mod1: mods.get(c) })));
+        const sl = new Set(PILOT.linkSLCodes && linkOn() ? PILOT.linkSLCodes(codes) : []);
+        const modsOff = codes.some(c => (sl.has(c) ? 'SL' : (plan.get(c) || '')) !== (mods.get(c) || ''));
+        return !!(noPrimary || modsOff);
+    }
+    let smartTriedSig = '';
+
     function reorderStillNeeded() {
-        if (isOrdered(readCurrentICD(), icdRank) && isOrdered(readCurrentCPT(), cptRank)) return false;
+        if (isInOrder(readCurrentICD(), 'icd') && isInOrder(readCurrentCPT(), 'cpt')) return false;
         return chartCodeSig() !== reorderTriedSig;
     }
     function pendingChangeCount() {
@@ -4287,6 +4182,9 @@
                 else if (cptNow.has('99051')) toDelete.push({ code: '99051', kind: 'cpt', reason: why });
             }
         }
+        // Excluded codes are never added or removed.
+        toAdd = toAdd.filter(a => !isExcludedCode(a));
+        toDelete = toDelete.filter(d => !isExcludedCode(d));
         return { toAdd, toDelete };
     }
 
@@ -4343,6 +4241,7 @@
         let step = 0;
         const apiMissing = ecwApiAvailable() ? [] : ecwApiMissing();
         actionRunning = true;
+        if (PILOT) PILOT.busy = true;   // auto-link waits until Add to EMR is done
         actionLog = [];
         resultNotice = null;
         panel.classList.add('busy');
@@ -4352,16 +4251,12 @@
             step++;
             setBusyStatus(`Removing <b>${escapeHtml(item.code)}</b> (${step} of ${total})`, step / total);
             let result;
-            if (item.kind === 'icd') {
-                result = await deleteICDRowWithRetry(item.code);
-            } else {
-                const row = getCPTRowByCode(item.code);
-                result = row ? await new Promise(resolve => deleteOneCPTRow(row, item.code, resolve)) : { ok: true };
-            }
+            result = await ecwRemoveCodeNoWarning(item.kind === 'icd' ? 'icd' : 'cpt', item.code);
             actionLog.push({
                 code: item.code, action: 'delete', kind: item.kind === 'icd' ? 'icd' : 'cpt',
                 status: result.ok ? 'success' : 'fail',
-                message: result.blocked ? "eCW won't allow deleting this here (mapped elsewhere, e.g. Patient Tracking) — remove it manually" : undefined
+                message: result.blocked ? "eCW won't allow deleting this here (no delete permission, or mapped elsewhere such as Patient Tracking) — remove it manually"
+                    : (result.unavailable ? "eCW's remove function isn't available on this page — open the Billing tab and try again" : undefined)
             });
         }
 
@@ -4414,10 +4309,28 @@
             }));
         }
 
-        setBusyStatus('Putting codes in order…', 1);
-        const order = await reorderBillingCodes();
+        let order, smart = null;
+        if (smartSortOn()) {
+            setBusyStatus('Smart Sort: ordering, primary diagnosis, modifiers…', 1);
+            try { smart = PILOT.smartSort.run(); } catch (e) { console.error('ECW Pilot: Smart Sort failed', e); }
+            await ecwApiSleep(600);
+            order = smart && smart.ok ? { ok: true } : { ok: false, message: 'Smart Sort could not reach the Billing grids — codes were not re-ordered' };
+        } else {
+            setBusyStatus('Putting codes in order…', 1);
+            order = await reorderBillingCodes();
+        }
         reorderTriedSig = chartCodeSig();
 
+        // Last step (Link = Auto): set every CPT's ICD pointers and modifiers
+        // from the Link rules, on the final, ordered code list.
+        let linked = null;
+        if (PILOT && PILOT.linkNow && PILOT.linkMode && PILOT.linkMode() === 'auto') {
+            setBusyStatus('Linking diagnosis pointers…', 1);
+            await ecwApiSleep(300);
+            try { linked = PILOT.linkNow(); } catch (e) { console.error('ECW Pilot: linking after Add to EMR failed', e); }
+        }
+
+        smartTriedSig = chartCodeSig() + '|' + JSON.stringify([...currentModifiers()]);
         const fails = actionLog.filter(e => e.status === 'fail');
         const done = actionLog.length - fails.length;
         const lines = fails.map(f => `${f.code} — could not ${f.action === 'add' ? 'add' : 'remove'}${f.message ? `: ${f.message}` : ''}`);
@@ -4428,7 +4341,10 @@
         const beforeIcd = new Set(beforeSnapshot.icd.map(x => x.code)), beforeCpt = new Set(beforeSnapshot.cpt.map(x => x.code));
         const addedCodes = [...[...afterIcd].filter(c => !beforeIcd.has(c)), ...[...afterCpt].filter(c => !beforeCpt.has(c))];
         const removedCodes = [...[...beforeIcd].filter(c => !afterIcd.has(c)), ...[...beforeCpt].filter(c => !afterCpt.has(c))];
-        const changeSummary = [addedCodes.length ? `Added: ${addedCodes.join(', ')}` : '', removedCodes.length ? `Removed: ${removedCodes.join(', ')}` : ''].filter(Boolean).join(' · ');
+        const changeSummary = [addedCodes.length ? `Added: ${addedCodes.join(', ')}` : '', removedCodes.length ? `Removed: ${removedCodes.join(', ')}` : '',
+            smart && smart.primary && smart.primary.set ? `Primary: ${smart.primary.code}` : '',
+            smart && smart.modifiersChanged ? `Modifiers updated on ${smart.modifiersChanged} code${smart.modifiersChanged === 1 ? '' : 's'}` : '',
+            linked && linked.rows ? `Linked ${linked.rows} procedure${linked.rows === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
         resultNotice = {
             ok: !lines.length,
             title: lines.length
@@ -4439,6 +4355,7 @@
         };
 
         actionRunning = false;
+        if (PILOT) PILOT.busy = false;
         activeQuick = null; activePlan = null;
         pick = {};
         analysisState = null;
@@ -4471,10 +4388,10 @@
     function afterColumnHtml(current, adds, dels, rank) {
         const delSet = new Set(dels.filter(d => isPicked('d', d)).map(d => d.code.toUpperCase()));
         const addCodes = new Set(adds.map(a => a.code.toUpperCase()));
-        const items = sortByRank([
+        const items = orderItems([
             ...current.filter(x => !delSet.has(x.code) && !addCodes.has(x.code)).map(x => Object.assign({}, x, { t: 'kept' })),
             ...adds.map(a => Object.assign({}, a, { t: 'add', isUpdate: current.some(x => x.code === a.code.toUpperCase()) }))
-        ], rank);
+        ], rank === icdRank ? 'icd' : 'cpt');
         if (!items.length) return `<div class="smc-empty">Nothing left</div>`;
         let n = 0;
         return items.map(x => {
@@ -4522,7 +4439,7 @@
     }
 
     function diffBlockHtml(title, current, adds, dels, rank, extra) {
-        const orderFix = !isOrdered(current, rank);
+        const orderFix = !isInOrder(current, rank === icdRank ? 'icd' : 'cpt');
         return `<div class="smc-block">
             <div class="smc-block-head"><h2>${title}</h2><span class="smc-sum">${sumHtml(adds, dels, orderFix)}</span></div>
             <div class="smc-diff">
@@ -4624,6 +4541,51 @@
         </div>`;
     }
 
+    const SMART_SORT_RULES_HTML = `<details class="smc-rules">
+        <summary>How codes are ordered (Smart Sort)</summary>
+        <p>Smart Sort is on. Diagnoses: the Smart Sort list moves to the bottom in its order, then every other Z code A→Z.
+        Procedures follow the Smart Sort procedure list. Add to EMR also sets a primary diagnosis if none is set, and applies the modifiers.</p>
+    </details>`;
+
+    // ---- Modifiers table: shown when Smart Sort and Link are both on ----
+    // Which CPTs get which modifier once the ticked changes are applied
+    // (Smart Sort's 25 / 59 rules + Link's SL for vaccines under 19).
+    function currentModifiers() {
+        const sc = getBillingScope();
+        const out = new Map();
+        ((sc && sc.cptData) || []).forEach(r => {
+            const c = String(r && r.code || '').trim().toUpperCase();
+            if (c && !out.has(c)) out.set(c, String(r.mod1 || '').trim());
+        });
+        return out;
+    }
+    function modifiersBlockHtml(current, adds, dels) {
+        if (!smartSortOn() || !linkOn()) return '';
+        const delSet = new Set(dels.filter(d => isPicked('d', d)).map(d => d.code.toUpperCase()));
+        const finalCodes = orderItems([
+            ...current.filter(x => !delSet.has(x.code)),
+            ...adds.filter(a => isPicked('a', a) && !current.some(x => x.code === a.code.toUpperCase())).map(a => ({ code: a.code.toUpperCase() }))
+        ], 'cpt').map(x => x.code);
+        const mods = currentModifiers();
+        const plan = PILOT.smartSort.planModifiers(finalCodes.map(c => ({ code: c, mod1: mods.get(c) || '' })));
+        const sl = new Set(PILOT.linkSLCodes ? PILOT.linkSLCodes(finalCodes) : []);
+        const byMod = new Map();
+        finalCodes.forEach(c => {
+            const m = sl.has(c) ? 'SL' : (plan.get(c) || '');
+            if (!m) return;
+            if (!byMod.has(m)) byMod.set(m, []);
+            if (!byMod.get(m).includes(c)) byMod.get(m).push(c);
+        });
+        const rows = [...byMod.entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+        const body = rows.length
+            ? rows.map(([m, codes]) => `<tr><td class="smc-mod">${escapeHtml(m)}</td><td>${codes.map(escapeHtml).join(', ')}</td></tr>`).join('')
+            : `<tr><td colspan="2" class="smc-empty">No modifiers on this claim</td></tr>`;
+        return `<div class="smc-block">
+            <div class="smc-block-head"><h2>Modifiers</h2><span class="smc-sum">after changes</span></div>
+            <table class="smc-mods"><thead><tr><th>Modifiers</th><th>CPT</th></tr></thead><tbody>${body}</tbody></table>
+        </div>`;
+    }
+
     const ORDER_RULES_HTML = `<details class="smc-rules">
         <summary>How codes are ordered</summary>
         <p>Diagnoses: disease codes first, Z codes always below them. Procedures:</p>
@@ -4698,7 +4660,8 @@
             ? `<div class="smc-note" style="margin:12px 18px 0">${escapeHtml(analysisState.officeVisitNote)}</div>` : '';
         return updatedNoticeHtml() + contextHtml() + resultHtml() + ovNote +
             diffBlockHtml('Diagnoses (ICD)', icdCur, p.icdAdds, p.icdDels, icdRank) +
-            diffBlockHtml('Procedures (CPT)', cptCur, p.cptAdds, p.cptDels, cptRank, legend + ORDER_RULES_HTML) +
+            diffBlockHtml('Procedures (CPT)', cptCur, p.cptAdds, p.cptDels, cptRank, legend + (smartSortOn() ? SMART_SORT_RULES_HTML : ORDER_RULES_HTML)) +
+            modifiersBlockHtml(cptCur, p.cptAdds, p.cptDels) +
             `<div style="height:10px"></div>`;
     }
 
@@ -4731,10 +4694,11 @@
             ...prop.toDelete.map(d => ({ k: keyOf('d', d.code), on: isPicked('d', d) }))
         ];
         const n = keys.filter(x => x.on).length;
-        const reorder = reorderStillNeeded();
+        const reorder = reorderStillNeeded() || smartTidyNeeded();
+        const tidyText = smartSortOn() ? 'Smart Sort will order codes, set primary and modifiers' : 'codes will be put in order';
         let sum;
-        if (!keys.length) sum = reorder ? 'No code changes — codes will be put in order' : 'No changes needed';
-        else sum = `<b>${n} of ${keys.length}</b> changes selected${reorder ? ', codes will be re-ordered' : ''}` +
+        if (!keys.length) sum = reorder ? `No code changes — ${tidyText}` : 'No changes needed';
+        else sum = `<b>${n} of ${keys.length}</b> changes selected${reorder ? `, ${smartSortOn() ? 'then Smart Sort' : 'codes will be re-ordered'}` : ''}` +
             `<br><button type="button" class="smc-link" data-act="toggle-all">${n === keys.length ? 'Untick all' : 'Tick all'}</button>`;
         return { sum, disabled: n === 0 && !reorder, count: n };
     }
@@ -4943,7 +4907,7 @@
         if (encKey !== lastEncounterKey) {
             lastEncounterKey = encKey;
             pick = {}; activeQuick = null; activePlan = null;
-            analysisState = null; lastAnalysisSig = ''; resultNotice = null; reviewState = null; reorderTriedSig = '';
+            analysisState = null; lastAnalysisSig = ''; resultNotice = null; reviewState = null; reorderTriedSig = ''; smartTriedSig = '';
         }
     }
 
@@ -5022,8 +4986,11 @@
                     <button type="button" class="smc-icon-btn" data-act="settings" title="Settings" aria-label="Settings" aria-haspopup="true" aria-expanded="false">${SETTINGS_ICON}</button>
                     <div class="smc-menu" id="smcMenu" role="menu" hidden>
                         <div class="smc-menu-h">Modules</div>
-                        <label class="smc-menu-row"><span>Sort</span><span class="smc-switch"><input type="checkbox" data-setting="sort"><span class="track"></span></span></label>
-                        <label class="smc-menu-row"><span>Link</span><span class="smc-switch"><input type="checkbox" data-setting="link"><span class="track"></span></span></label>
+                        <label class="smc-menu-row"><span>Smart Sort</span><span class="smc-switch"><input type="checkbox" data-setting="sort"><span class="track"></span></span></label>
+                        <div class="smc-menu-row smc-menu-link"><span>Link</span>
+                            <span class="smc-seg" role="radiogroup" aria-label="Link mode">
+                                <button type="button" data-linkmode="off" role="radio">Off</button><button type="button" data-linkmode="manual" role="radio">Manual</button><button type="button" data-linkmode="auto" role="radio">Auto</button>
+                            </span></div>
                         <label class="smc-menu-row"><span>Claim Link</span><span class="smc-switch"><input type="checkbox" data-setting="claimLink"><span class="track"></span></span></label>
                         <div class="smc-menu-note" id="smcMenuNote"></div>
                         <div class="smc-menu-sep"></div>
@@ -5079,6 +5046,8 @@
             if (tabBtn) { setTab(tabBtn.dataset.tab); return; }
             const qa = t.closest('[data-qa]');
             if (qa && !qa.disabled) { toggleQuickAction(qa.dataset.qa); return; }
+            const seg = t.closest('[data-linkmode]');
+            if (seg && !seg.disabled) { setLinkMode(seg.dataset.linkmode); return; }
             const act = t.closest('[data-act]');
             if (act) {
                 if (act.dataset.act === 'minimize') closePanelToLauncher();
@@ -5100,7 +5069,7 @@
         });
         panel.addEventListener('change', e => {
             const t = e.target;
-            if (t.dataset && t.dataset.setting) { onModuleToggle(t.dataset.setting, t.checked); return; }
+            if (t.dataset && t.dataset.setting) { onModuleToggle(t.dataset.setting, t.checked).then(() => { lastAnalysisSig = ''; renderPanel(true); }); return; }
             if (t.dataset && t.dataset.k) { pick[t.dataset.k] = t.checked; renderPanel(); return; }
             if (t.id === 'smcWeekend') { setWeekendOverride(!!t.checked); lastAnalysisSig = ''; renderPanel(); }
         });
@@ -5114,9 +5083,34 @@
     }
 
     // ---- Settings menu: Sort / Link / Claim Link on-off, panel side ----
-    const MODULE_LABELS = { sort: 'Sort', link: 'Link', claimLink: 'Claim Link' };
+    const MODULE_LABELS = { sort: 'Smart Sort', link: 'Link', claimLink: 'Claim Link' };
+    // Link: Off (button disabled) / Manual (button only) / Auto (button + auto-link).
+    function currentLinkMode() {
+        if (!PILOT || !PILOT.settings || !PILOT.settings.get('link')) return 'off';
+        return PILOT.settings.get('linkAuto') ? 'auto' : 'manual';
+    }
+    async function setLinkMode(mode) {
+        if (!PILOT || !PILOT.settings) return;
+        PILOT.settings.set('link', mode !== 'off');
+        PILOT.settings.set('linkAuto', mode === 'auto');
+        if (PILOT.loadModule) await PILOT.loadModule('link');
+        window.dispatchEvent(new Event('ecwpilot:settings-changed'));
+        syncSettingsMenu();
+        const msg = { off: 'Link is off — the button is disabled', manual: 'Link: manual — click Link to link', auto: 'Link: auto — links whenever the codes change' }[mode];
+        const note = document.getElementById('smcMenuNote');
+        if (note) note.textContent = msg;
+        showToast(msg);
+    }
     function syncSettingsMenu() {
         if (!panel) return;
+        const linkAvailable = !!(PILOT && PILOT.hasModule && PILOT.hasModule('link'));
+        const mode = currentLinkMode();
+        panel.querySelectorAll('[data-linkmode]').forEach(b => {
+            const on = b.dataset.linkmode === mode;
+            b.classList.toggle('on', on);
+            b.setAttribute('aria-checked', String(on));
+            b.disabled = !linkAvailable;
+        });
         panel.querySelectorAll('[data-setting]').forEach(box => {
             const key = box.dataset.setting;
             const available = !!(PILOT && PILOT.hasModule && PILOT.hasModule(key));
@@ -5146,7 +5140,8 @@
             if (note) note.textContent = msg;
             showToast(msg);
         } else {
-            const msg = PILOT.isLoaded && PILOT.isLoaded(key)
+            // Smart Sort checks the setting each time, so it's off at once.
+            const msg = key !== 'sort' && PILOT.isLoaded && PILOT.isLoaded(key)
                 ? `${MODULE_LABELS[key]} turns off after you refresh the page`
                 : `${MODULE_LABELS[key]} is off`;
             if (note) note.textContent = msg;
@@ -5164,6 +5159,11 @@
         if (bar) bar.hidden = !(PILOT && PILOT.updateAvailable);
     }
     window.addEventListener('ecwpilot:update-available', () => { syncUpdateBar(); showToast('A new version of ECW Pilot is available — refresh to update'); });
+    // The Link button is always there next to History — disabled when Link
+    // is Off — so the Link file loads even when it's turned off.
+    if (PILOT && PILOT.hasModule && PILOT.hasModule('link') && PILOT.loadModule) {
+        try { PILOT.loadModule('link'); } catch (e) {}
+    }
     function updatedNoticeHtml() {
         const list = PILOT && PILOT.justUpdated;
         if (!list || !list.length) return '';

@@ -75,21 +75,45 @@ var ICD_HEAD = [
   // ascending code order.
 
   // Pure: items in, sorted copy out (same algorithm as the extension).
-  function orderICDItems(items, getCode) {
+  // getPrimary(item) -> true for a diagnosis already marked primary (optional).
+  function orderICDItems(items, getCode, getPrimary) {
     var arr = items.slice();
     ICD_HEAD.forEach(function (c) { moveToBottom(arr, getCode, c); });
     var head = new Set(ICD_HEAD);
     var tail = arr.filter(function (r) { var c = getCode(r); return c.startsWith("Z") && !head.has(c); });
     var keep = arr.filter(function (r) { return tail.indexOf(r) === -1; });
     tail.sort(function (a, b) { return getCode(a) < getCode(b) ? -1 : getCode(a) > getCode(b) ? 1 : 0; });
-    return keep.concat(tail);
+    return floatPrimaryToTop(keep.concat(tail), getCode, getPrimary);
+  }
+
+  // The primary diagnosis belongs in row 1 (pointer 1 on the claim).
+  // eCW moves it there itself when the Billing tab is saved, so if we leave
+  // it further down, every code below shifts up afterwards and the CPT
+  // diagnosis pointers Link just set end up on the wrong rows. Doing the
+  // move here means the pointers are built against the final order.
+  // The row chosen is the one already marked primary; if none is marked,
+  // it's the one Smart Sort would set (the first that's allowed to be
+  // primary) — the same code the panel tags "PRIMARY . will be set".
+  function floatPrimaryToTop(arr, getCode, getPrimary) {
+    var i = -1;
+    if (typeof getPrimary === "function") {
+      i = arr.findIndex(function (r) { return getPrimary(r); });
+    }
+    if (i === -1) {
+      i = arr.findIndex(function (r) { return isPrimaryAllowedICD(getCode(r)); });
+    }
+    if (i <= 0) return arr;                       // none found, or already row 1
+    var out = arr.slice();
+    out.unshift(out.splice(i, 1)[0]);
+    return out;
   }
 
   function sortICD() {
     var s = findListScope("#billingTbl2", "icdData");
     if (!s) return false;
     var getCode = function (r) { return (r && r.medicalcode || "").trim(); };
-    var sorted = orderICDItems(s.icdData, getCode);
+    var getPrimary = function (r) { return !!r && String(r.isPrimaryAsmt) === "1"; };
+    var sorted = orderICDItems(s.icdData, getCode, getPrimary);
     applyScope(s, function () { replaceInPlace(s.icdData, sorted); });
 
     // Same safety net as before, in case the row-number cell isn't bound to $index.
@@ -480,9 +504,11 @@ var CPT_ORDER = [
   // run(): what Add to EMR calls instead of the basic ordering.
   function run() {
     var t0 = performance.now();
+    // Primary first: sortICD() floats whichever row is marked primary to the
+    // top, so it has to be set before the list is ordered.
+    var primary = setPrimaryIfMissing();
     var icd = sortICD();
     var cpt = sortCPT();
-    var primary = setPrimaryIfMissing();
     var mods = applyModifiers();
     var ms = Math.round(performance.now() - t0);
     console.log("[Smart Sort] done in " + ms + " ms", { primary: primary, modifiersChanged: mods });

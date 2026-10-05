@@ -11,9 +11,9 @@
     "sort": {
       "label": "Smart Sort",
       "path": "shared/sort.js",
-      "version": "1.3",
+      "version": "1.4",
       "notes": [
-        "Detects an un-starred primary while the tab is open (reads what the \u2605 shows)"
+        "The primary diagnosis is now moved to row 1 \u2014 eCW used to move it there itself after the Billing tab closed, which shifted the other codes and left the CPT diagnosis pointers on the wrong rows"
       ]
     },
     "claimLink": {

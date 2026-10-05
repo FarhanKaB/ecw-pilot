@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ECW Pilot
 // @namespace    ecw-pilot
-// @version      1.2
+// @version      1.3
 // @description  Loads ECW Pilot for your practice from GitHub: coding panel, patient history, Sort, Link and Claim Link.
 // @match        *://*.ecwcloud.com/*
 // @match        *://*.eclinicalworks.com/*

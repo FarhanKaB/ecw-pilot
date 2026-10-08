@@ -11,9 +11,9 @@
     "sort": {
       "label": "Smart Sort",
       "path": "shared/sort.js",
-      "version": "1.5",
+      "version": "1.6",
       "notes": [
-        "Primary diagnosis fix is back: Smart Sort follows the ★ you see right now (so after you un-star a code it sets a new primary), and that primary goes to row 1"
+        "Primary fix: Smart Sort now sets exactly the diagnosis the panel shows as PRIMARY, even when eCW moves the ★ by itself while codes are removed or added"
       ]
     },
     "claimLink": {
@@ -33,9 +33,10 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.8",
+          "version": "1.11",
           "notes": [
-            "Link button shows only inside the panel on the Billing tab"
+            "Z01.00, Z02.5, Z09 and Z02.1 are always proposed for deletion when found on a chart",
+            "Preventive Counseling (99401) can be billed once every 2 months (was 30 days)"
           ]
         },
         "link": {

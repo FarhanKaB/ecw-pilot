@@ -31,6 +31,9 @@
     ];
     const EXCLUDE_CPT = [
     ];
+    // ICDs that are ALWAYS removed when found on a chart (guideline §15).
+    // (The opposite of EXCLUDE_ICD above, which is never touched.)
+    const ALWAYS_DELETE_ICD = new Set(['Z01.00', 'Z02.5', 'Z09', 'Z02.1']);
     const EXCLUDED_ICD_SET = new Set(EXCLUDE_ICD.map(c => String(c).trim().toUpperCase()));
     const EXCLUDED_CPT_SET = new Set(EXCLUDE_CPT.map(c => String(c).trim().toUpperCase()));
     function isExcludedCode(item) {
@@ -992,6 +995,36 @@
             const codes = [...(enc.visit_codes || []), ...(enc.procedure_codes || [])]
                 .map(c => String(c.code || '').trim().toUpperCase());
             if (codes.includes('G0136')) return { date: enc.encounter_date };
+        }
+        return null;
+    }
+
+    // Was `code` billed in a PRIOR encounter within the last `months`
+    // CALENDAR months of the current DOS? Same cutoff as the G0136 check:
+    // the same day of the month `months` earlier (clamped to that month's
+    // length, e.g. 04/30 -> 02/28), inclusive. The current encounter and
+    // anything after it never count; a prior use under a different payer
+    // doesn't count. Returns { date } of the blocking visit, or null.
+    function codeUsedInLastMonths(code, months) {
+        const api = window.__ecwPatientHistory;
+        const data = api && api.getData ? api.getData() : null;
+        if (!data || !data.length) return null;
+        const dos = parseUSDateSnap(getCurrentDOSStr());
+        if (!dos) return null;
+        const src = new Date(dos);
+        const cutoff = new Date(dos);
+        cutoff.setDate(1);
+        cutoff.setMonth(cutoff.getMonth() - months);
+        const lastDay = new Date(cutoff.getFullYear(), cutoff.getMonth() + 1, 0).getDate();
+        cutoff.setDate(Math.min(src.getDate(), lastDay));
+        const cutoffMs = +cutoff, upper = code.toUpperCase();
+        for (const enc of data) {
+            const t = parseUSDateSnap(enc.encounter_date);
+            if (!t || t < cutoffMs || t >= dos) continue;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) continue;
+            const codes = [...(enc.visit_codes || []), ...(enc.procedure_codes || [])]
+                .map(x => String(x.code || '').trim().toUpperCase());
+            if (codes.includes(upper)) return { date: enc.encounter_date };
         }
         return null;
     }
@@ -2070,6 +2103,10 @@
             const code = entry.code.toUpperCase();
             if (code === 'Z13.6' && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Z13.6 is no longer used for EKG (93000) linking or any other purpose — always deleted if present' });
+            }
+            // Guideline §15: these ICDs are never billed — always deleted if present.
+            if (ALWAYS_DELETE_ICD.has(code) && !toDelete.some(d => d.code === entry.code)) {
+                toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: `${code} is never billed — always deleted if present (coding guideline)` });
             }
             if (code === 'Z13.31' && !hasDepressionScreeningCpt && !toDelete.some(d => d.code === entry.code)) {
                 toDelete.push({ code: entry.code, row: entry.row, kind: 'icd', reason: 'Depression screening ICD present but no depression screening CPT on chart' });
@@ -3540,8 +3577,11 @@
         // Healthfirst included, uses the same 30-day gap below.
         if (isCapitatedInsurance(insurance)) {
             pc = { disabled: true, title: `Preventive Counseling (99401) not applicable for capitated insurance (${insurance})` };
-        } else if ([...PREVENTIVE_ALL_CODES, '99401'].some(c => codeUsedInLastDays(c, 30))) {
-            pc = { disabled: true, title: 'Preventive or Preventive Counseling billed in the last 30 days' };
+        } else if (PREVENTIVE_ALL_CODES.some(c => codeUsedInLastDays(c, 30))) {
+            pc = { disabled: true, title: 'Preventive billed in the last 30 days' };
+        } else if (codeUsedInLastMonths('99401', 2)) {
+            // 99401: once every 2 calendar months.
+            pc = { disabled: true, title: `Preventive Counseling (99401) already billed on ${codeUsedInLastMonths('99401', 2).date} — once every 2 months` };
         } else if (isPreventiveCounselBlockedIns(insurance)) {
             pc = { disabled: true, title: `Preventive Counseling not applicable for ${insurance || 'this insurance'}` };
         } else if (!hasChronicDiseaseThisEncounter) {
@@ -4241,6 +4281,10 @@
         const dels = prop.toDelete.filter(d => isPicked('d', d));
         const adds = prop.toAdd.filter(a => isPicked('a', a));
         const total = dels.length + adds.length + 1;
+        // The diagnosis the panel shows as PRIMARY. Smart Sort sets exactly this one
+        // at the end, even if eCW moves the ★ by itself while codes are removed/added.
+        let primaryTarget = null;
+        try { primaryTarget = smartSortOn() ? (sp => predictedPrimary(readCurrentICD(), sp.icdAdds, sp.icdDels))(splitProposal(prop)) : null; } catch (e) {}
         let step = 0;
         const apiMissing = ecwApiAvailable() ? [] : ecwApiMissing();
         actionRunning = true;
@@ -4315,7 +4359,7 @@
         let order, smart = null;
         if (smartSortOn()) {
             setBusyStatus('Smart Sort: ordering, primary diagnosis, modifiers…', 1);
-            try { smart = await PILOT.smartSort.run(); } catch (e) { console.error('ECW Pilot: Smart Sort failed', e); }
+            try { smart = await PILOT.smartSort.run({ primary: primaryTarget && primaryTarget.code }); } catch (e) { console.error('ECW Pilot: Smart Sort failed', e); }
             await ecwApiSleep(600);
             order = smart && smart.ok ? { ok: true } : { ok: false, message: 'Smart Sort could not reach the Billing grids — codes were not re-ordered' };
         } else {
@@ -4399,7 +4443,7 @@
         const live = livePrimaryCode();
         const delSet = new Set(dels.filter(d => isPicked('d', d)).map(d => d.code.toUpperCase()));
         if (live && !delSet.has(live)) return { code: live, will: false };
-        if (live) {
+        if (live && !smartSortOn()) {
             const i = current.findIndex(x => x.code === live);
             const next = current.slice(i + 1).find(x => !delSet.has(x.code));
             if (next) return { code: next.code, will: true, why: `${live} is removed — eCW moves primary to the next diagnosis` };

@@ -112,7 +112,9 @@ var ICD_HEAD = [
     var s = findListScope("#billingTbl2", "icdData");
     if (!s) return false;
     var getCode = function (r) { return (r && r.medicalcode || "").trim(); };
-    var getPrimary = function (r) { return !!r && String(r.isPrimaryAsmt) === "1"; };
+    // Row 1 = the diagnosis the ★ shows right now (live), not the saved flag.
+    var live = currentPrimary(s);
+    var getPrimary = function (r) { return !!live && getCode(r).toUpperCase() === String(live).toUpperCase(); };
     var sorted = orderICDItems(s.icdData, getCode, getPrimary);
     applyScope(s, function () { replaceInPlace(s.icdData, sorted); });
 
@@ -457,23 +459,71 @@ var CPT_ORDER = [
   }
 
 
-  // If no diagnosis is primary yet, make the first one that's allowed primary.
-  function setPrimaryIfMissing() {
+  // ── Primary: what eCW currently has ─────────────────────────────────
+  // Checked on a live chart: eCW's ★ follows $scope.primaryArr (codes) /
+  // primaryNameArr (names) — updated the moment a ★ is set or un-set.
+  // isPrimaryAsmt on the row is only what was SAVED and never changes while
+  // the tab is open, so it's used only if eCW has no primaryArr at all.
+  function primaryScope(s) {
+    var x = s;
+    while (x && !Array.isArray(x.primaryArr)) x = x.$parent;
+    return x || null;
+  }
+  function currentPrimary(s) {
+    if (!s || !Array.isArray(s.icdData)) return null;
+    var ps = primaryScope(s);
+    if (ps) {
+      var codes = s.icdData.map(function (r) { return String(r && r.medicalcode || "").trim().toUpperCase(); });
+      var live = ps.primaryArr.map(function (c) { return String(c || "").trim().toUpperCase(); })
+        .find(function (c) { return codes.indexOf(c) !== -1; });
+      return live || null;
+    }
+    var flagged = s.icdData.find(function (r) { return r && String(r.isPrimaryAsmt) === "1"; });
+    return flagged ? String(flagged.medicalcode || "").trim() : null;
+  }
+  function hasPrimary() {
+    return !!currentPrimary(findListScope("#billingTbl2", "icdData"));
+  }
+
+  // If no diagnosis is primary yet, make the first one that's allowed primary
+  // — the same way clicking its ★ does: run that row's own ng-click
+  // expression on the row's scope (right arguments, e.g. $index, included).
+  async function setPrimaryIfMissing() {
     var s = findListScope("#billingTbl2", "icdData");
     if (!s || !s.icdData.length) return { set: false };
-    if (s.icdData.some(function (r) { return r && String(r.isPrimaryAsmt) === "1"; })) return { set: false, already: true };
-    var idx = s.icdData.findIndex(function (r) { return r && isPrimaryAllowedICD(r.medicalcode); });
-    if (idx === -1) return { set: false, reason: "no diagnosis on the claim can be primary" };
-    var item = s.icdData[idx];
-    var rows = document.querySelectorAll("#billingTbl2 tbody tr[ng-repeat]");
-    var owner = rows[idx] ? rowScope(rows[idx]) : null;
-    if (!owner || typeof owner.makeICDPrimary !== "function") {
-      owner = s;
-      while (owner && typeof owner.makeICDPrimary !== "function") owner = owner.$parent;
+    var existing = currentPrimary(s);
+    if (existing) return { set: false, already: true, code: existing };
+    var item = s.icdData.find(function (r) { return r && isPrimaryAllowedICD(r.medicalcode); });
+    if (!item) return { set: false, reason: "no diagnosis on the claim can be primary" };
+
+    // The grid row that shows this diagnosis (matched by its data, not position).
+    var rows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr[ng-repeat]"));
+    var tr = rows.find(function (r) { var rs = rowScope(r); return rs && rs.code === item; }) ||
+             rows.find(function (r) { return codeForRow(r) === String(item.medicalcode).trim(); });
+    var rs = tr ? rowScope(tr) : null;
+    var cell = tr ? tr.querySelector('[ng-click*="makeICDPrimary"]') : null;
+    var expr = cell ? cell.getAttribute("ng-click") : "";
+    try {
+      if (rs && expr && typeof rs.$eval === "function") {
+        applyScope(rs, function () { rs.$eval(expr); });
+      } else {
+        var owner = rs;
+        while (owner && typeof owner.makeICDPrimary !== "function") owner = owner.$parent;
+        if (!owner) { owner = s; while (owner && typeof owner.makeICDPrimary !== "function") owner = owner.$parent; }
+        if (!owner) return { set: false, reason: "eCW's make-primary (★) function was not found" };
+        applyScope(owner, function () { owner.makeICDPrimary(item); });   // eCW's ★: makeICDPrimary(code)
+      }
+    } catch (e) {
+      console.error("[Smart Sort] setting the primary diagnosis failed", e);
+      return { set: false, reason: "eCW refused: " + (e && e.message || e) };
     }
-    if (!owner) return { set: false, reason: "eCW's makeICDPrimary was not found" };
-    applyScope(owner, function () { owner.makeICDPrimary(item); });
-    return { set: true, code: item.medicalcode };
+    // Confirm eCW now has a primary (it may finish a moment later).
+    for (var i = 0; i < 15; i++) {
+      var now = currentPrimary(s);
+      if (now) return { set: true, code: now };
+      await new Promise(function (r) { setTimeout(r, 150); });
+    }
+    return { set: false, reason: "eCW did not mark " + item.medicalcode + " as primary" };
   }
 
   // ═══ Guard (active while Smart Sort is on) ═══════════════════════════
@@ -502,11 +552,11 @@ var CPT_ORDER = [
 
   // ═══ For the coding panel ═══════════════════════════════════════════
   // run(): what Add to EMR calls instead of the basic ordering.
-  function run() {
+  async function run() {
     var t0 = performance.now();
     // Primary first: sortICD() floats whichever row is marked primary to the
     // top, so it has to be set before the list is ordered.
-    var primary = setPrimaryIfMissing();
+    var primary = await setPrimaryIfMissing();
     var icd = sortICD();
     var cpt = sortCPT();
     var mods = applyModifiers();
@@ -520,7 +570,13 @@ var CPT_ORDER = [
     run: run,
     planModifiers: planModifiers,
     isPrimaryAllowedICD: isPrimaryAllowedICD,
-    orderICDCodes: function (codes) { return orderICDItems(codes, function (c) { return String(c || "").trim().toUpperCase(); }); },
+    hasPrimary: hasPrimary,
+    currentPrimary: function () { return currentPrimary(findListScope("#billingTbl2", "icdData")); },
+    orderICDCodes: function (codes) {
+      var norm = function (c) { return String(c || "").trim().toUpperCase(); };
+      var live = currentPrimary(findListScope("#billingTbl2", "icdData"));
+      return orderICDItems(codes, norm, live ? function (c) { return norm(c) === norm(live); } : null);
+    },
     orderCPTCodes: function (codes) { return orderCPTItems(codes, function (c) { return String(c || "").trim(); }); }
   };
   if (PILOT) PILOT.smartSort = api;

@@ -11,9 +11,9 @@
     "sort": {
       "label": "Smart Sort",
       "path": "shared/sort.js",
-      "version": "1.4",
+      "version": "1.5",
       "notes": [
-        "The primary diagnosis is now moved to row 1 \u2014 eCW used to move it there itself after the Billing tab closed, which shifted the other codes and left the CPT diagnosis pointers on the wrong rows"
+        "Primary diagnosis fix is back: Smart Sort follows the ★ you see right now (so after you un-star a code it sets a new primary), and that primary goes to row 1"
       ]
     },
     "claimLink": {
@@ -43,7 +43,7 @@
           "path": "clients/highland/link.js",
           "version": "1.5",
           "notes": [
-            "Auto mode: the Link button is now a soft green \"Linked \u2713\" (click to link again)"
+            "Auto mode: the Link button is now a soft green \"Linked ✓\" (click to link again)"
           ]
         }
       },

@@ -485,21 +485,14 @@ var CPT_ORDER = [
     return !!currentPrimary(findListScope("#billingTbl2", "icdData"));
   }
 
-  // If no diagnosis is primary yet, make the first one that's allowed primary
-  // — the same way clicking its ★ does: run that row's own ng-click
-  // expression on the row's scope (right arguments, e.g. $index, included).
-  async function setPrimaryIfMissing() {
-    var s = findListScope("#billingTbl2", "icdData");
-    if (!s || !s.icdData.length) return { set: false };
-    var existing = currentPrimary(s);
-    if (existing) return { set: false, already: true, code: existing };
-    var item = s.icdData.find(function (r) { return r && isPrimaryAllowedICD(r.medicalcode); });
-    if (!item) return { set: false, reason: "no diagnosis on the claim can be primary" };
-
-    // The grid row that shows this diagnosis (matched by its data, not position).
+  // Click the ★ of `item`'s row the same way the coder would: run that row's
+  // own ng-click on the row's scope. Never call this for the row that is
+  // already primary (eCW's ★ toggles, so that would un-star it).
+  async function starItem(s, item) {
+    var want = String(item.medicalcode || "").trim().toUpperCase();
     var rows = Array.from(document.querySelectorAll("#billingTbl2 tbody tr[ng-repeat]"));
     var tr = rows.find(function (r) { var rs = rowScope(r); return rs && rs.code === item; }) ||
-             rows.find(function (r) { return codeForRow(r) === String(item.medicalcode).trim(); });
+             rows.find(function (r) { return codeForRow(r).toUpperCase() === want; });
     var rs = tr ? rowScope(tr) : null;
     var cell = tr ? tr.querySelector('[ng-click*="makeICDPrimary"]') : null;
     var expr = cell ? cell.getAttribute("ng-click") : "";
@@ -511,19 +504,46 @@ var CPT_ORDER = [
         while (owner && typeof owner.makeICDPrimary !== "function") owner = owner.$parent;
         if (!owner) { owner = s; while (owner && typeof owner.makeICDPrimary !== "function") owner = owner.$parent; }
         if (!owner) return { set: false, reason: "eCW's make-primary (★) function was not found" };
-        applyScope(owner, function () { owner.makeICDPrimary(item); });   // eCW's ★: makeICDPrimary(code)
+        applyScope(owner, function () { owner.makeICDPrimary(item); });
       }
     } catch (e) {
       console.error("[Smart Sort] setting the primary diagnosis failed", e);
       return { set: false, reason: "eCW refused: " + (e && e.message || e) };
     }
-    // Confirm eCW now has a primary (it may finish a moment later).
+    // Confirm eCW now shows THIS code as primary (it may finish a moment later).
     for (var i = 0; i < 15; i++) {
-      var now = currentPrimary(s);
-      if (now) return { set: true, code: now };
+      if (String(currentPrimary(s) || "").toUpperCase() === want) return { set: true, code: item.medicalcode };
       await new Promise(function (r) { setTimeout(r, 150); });
     }
     return { set: false, reason: "eCW did not mark " + item.medicalcode + " as primary" };
+  }
+
+  // Make sure the right diagnosis is primary.
+  // target = the code the coding panel showed as PRIMARY. During Add to EMR,
+  // eCW moves the ★ by itself (when the primary is removed, or when codes
+  // are added to a claim with no primary), so whatever eCW starred is
+  // replaced with the code the panel promised.
+  // No target: keep an existing primary; if none, pick the first allowed
+  // diagnosis in Smart Sort's final order (the same pick the panel shows).
+  async function setPrimaryIfMissing(target) {
+    var s = findListScope("#billingTbl2", "icdData");
+    if (!s || !s.icdData.length) return { set: false };
+    var existing = currentPrimary(s);
+    var norm = function (c) { return String(c || "").trim().toUpperCase(); };
+    var byCode = function (code) { return s.icdData.find(function (r) { return r && norm(r.medicalcode) === norm(code); }); };
+
+    var wanted = target ? byCode(target) : null;
+    if (wanted) {
+      if (norm(existing) === norm(wanted.medicalcode)) return { set: false, already: true, code: existing };
+      var res = await starItem(s, wanted);
+      if (res.set && existing) res.replaced = existing;
+      return res;
+    }
+    if (existing) return { set: false, already: true, code: existing };
+    var ordered = orderICDItems(s.icdData.map(function (r) { return r.medicalcode; }), norm, null);
+    var pick = ordered.find(function (c) { return isPrimaryAllowedICD(c); });
+    if (!pick) return { set: false, reason: "no diagnosis on the claim can be primary" };
+    return await starItem(s, byCode(pick));
   }
 
   // ═══ Guard (active while Smart Sort is on) ═══════════════════════════
@@ -552,11 +572,12 @@ var CPT_ORDER = [
 
   // ═══ For the coding panel ═══════════════════════════════════════════
   // run(): what Add to EMR calls instead of the basic ordering.
-  async function run() {
+  async function run(opts) {
+    opts = opts || {};
     var t0 = performance.now();
     // Primary first: sortICD() floats whichever row is marked primary to the
     // top, so it has to be set before the list is ordered.
-    var primary = await setPrimaryIfMissing();
+    var primary = await setPrimaryIfMissing(opts.primary);
     var icd = sortICD();
     var cpt = sortCPT();
     var mods = applyModifiers();

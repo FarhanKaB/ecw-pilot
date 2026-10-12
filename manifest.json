@@ -33,16 +33,12 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.16",
+          "version": "1.22",
           "notes": [
-            "Preventive visit or Obesity Counseling (G0447): the Z68 code is added even after the 4-per-year limit (the BMI CPTs keep the limit)",
-            "Fix: Z68 is now added on non-preventive visits too (it goes with 3008F / G8417 / G8418 / G8420)",
-            "BMI codes (G8417/G8418/G8420, 3008F, Z68) on ANY visit with a documented BMI — not only preventive visits; 4 times per calendar year each",
-            "Adult BMI: G8418 up to 18.5, G8420 up to 24.99, G8417 from 25; ICD Z68.18 / Z68.19 below 20",
-            "Children: Z68.55 for 120% of the 95th percentile",
-            "Pain (1125F / 1126F) decided by ICD code only",
-            "Alcohol: G0442 (or 3016F when G0442 can't be billed), G9622 if negative, no positive code",
-            "Depression: G0444 (or 3725F when G0444 can't be billed)"
+            "UHC: no G-codes on the claim — ECW Pilot doesn't add them and removes any already on the chart (except G0101 / G0102 / G0103)",
+            "G0444 / G0442 on any visit (not only preventive), once per insurance per calendar year, not for Medicare / Medicaid / UHC",
+            "Depression: G0444 (3725F when G0444 can't be billed) + G8510 / G8431 (UHC: 3725F alone)",
+            "Alcohol: positive → G0442 (3016F when G0442 can't be billed); negative → 3016F + G9622 (3016F only for Medicare / Medicaid / UHC)"
           ]
         },
         "link": {

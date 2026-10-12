@@ -33,8 +33,10 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.14",
+          "version": "1.16",
           "notes": [
+            "Preventive visit or Obesity Counseling (G0447): the Z68 code is added even after the 4-per-year limit (the BMI CPTs keep the limit)",
+            "Fix: Z68 is now added on non-preventive visits too (it goes with 3008F / G8417 / G8418 / G8420)",
             "BMI codes (G8417/G8418/G8420, 3008F, Z68) on ANY visit with a documented BMI — not only preventive visits; 4 times per calendar year each",
             "Adult BMI: G8418 up to 18.5, G8420 up to 24.99, G8417 from 25; ICD Z68.18 / Z68.19 below 20",
             "Children: Z68.55 for 120% of the 95th percentile",

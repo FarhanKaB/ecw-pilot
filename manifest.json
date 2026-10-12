@@ -11,9 +11,9 @@
     "sort": {
       "label": "Smart Sort",
       "path": "shared/sort.js",
-      "version": "1.6",
+      "version": "1.7",
       "notes": [
-        "Primary fix: Smart Sort now sets exactly the diagnosis the panel shows as PRIMARY, even when eCW moves the ★ by itself while codes are removed or added"
+        "Z68.18 / Z68.19 sort to the bottom with the other BMI codes"
       ]
     },
     "claimLink": {
@@ -33,10 +33,14 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.11",
+          "version": "1.14",
           "notes": [
-            "Z01.00, Z02.5, Z09 and Z02.1 are always proposed for deletion when found on a chart",
-            "Preventive Counseling (99401) can be billed once every 2 months (was 30 days)"
+            "BMI codes (G8417/G8418/G8420, 3008F, Z68) on ANY visit with a documented BMI — not only preventive visits; 4 times per calendar year each",
+            "Adult BMI: G8418 up to 18.5, G8420 up to 24.99, G8417 from 25; ICD Z68.18 / Z68.19 below 20",
+            "Children: Z68.55 for 120% of the 95th percentile",
+            "Pain (1125F / 1126F) decided by ICD code only",
+            "Alcohol: G0442 (or 3016F when G0442 can't be billed), G9622 if negative, no positive code",
+            "Depression: G0444 (or 3725F when G0444 can't be billed)"
           ]
         },
         "link": {

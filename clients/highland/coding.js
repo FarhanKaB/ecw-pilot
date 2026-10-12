@@ -2257,9 +2257,11 @@
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
         const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447') && !gating.ob.disabled;
         // No BMI CPT can be billed any more this year (both limits reached)
-        // → the Z68 code goes too, unless Obesity Counseling (G0447) needs it.
+        // → the Z68 code goes too. EXCEPT on a preventive visit or with
+        // Obesity Counseling (G0447): there the Z68 code is still added/kept
+        // (only the Z code — the BMI CPTs keep their 4-per-year limit).
         const bmiYearLimitReached = bmiGLimit && bmi3008Limit;
-        const bmiZ68StillNeeded = (!!bmi && !bmiYearLimitReached) || hasObesityCPTForBMI;
+        const bmiZ68StillNeeded = (!!bmi && !bmiYearLimitReached) || hasPreventiveVisit || hasObesityCPTForBMI;
         const currentZ68Entries = getICDRows().filter(e => /^Z68\./i.test(e.code));
         if (!bmiZ68StillNeeded) {
             currentZ68Entries.forEach(e => {
@@ -2735,8 +2737,10 @@
                   why: 'No preventive visit code on the final claim — well-visit Z code not needed' },
                 { test: c => ['Z71.3', 'Z71.82', 'Z71.89'].includes(c), keep: hasPrev || finalCpt.has('99401'),
                   why: 'No preventive visit or Preventive Counseling (99401) on the final claim — counseling Z code not needed' },
-                { test: c => /^Z68\./.test(c), keep: hasPrev || finalCpt.has('G0447'),
-                  why: 'No preventive visit or Obesity Counseling (G0447) on the final claim — BMI Z code not needed' },
+                // Z68 goes with the BMI CPTs (any visit), and is always kept
+                // with a preventive visit or Obesity Counseling (G0447).
+                { test: c => /^Z68\./.test(c), keep: hasPrev || ['3008F', 'G8417', 'G8418', 'G8420', 'G0447'].some(x => finalCpt.has(x)),
+                  why: 'No BMI code (3008F / G8417 / G8418 / G8420), preventive visit or Obesity Counseling (G0447) on the final claim — BMI Z code not needed' },
                 { test: c => c === 'Z71.6', keep: finalCpt.has('99406'),
                   why: 'No Smoking Counseling (99406) on the final claim — tobacco counseling Z code not needed' }
             ];
@@ -3994,9 +3998,7 @@
         if (current !== 'pc') out = out.concat(planDeletesPresent([], ['99401'], reason));
         if (current !== 'sm') out = out.concat(planDeletesPresent([], ['99406'], reason));
         if (current !== 'ob') out = out.concat(planDeletesPresent([], ['G0447'], reason));
-        if (current !== 'pv' && current !== 'ob') {
-            readCurrentICD().filter(r => /^Z68\./.test(r.code)).forEach(r => out.push({ code: r.code, kind: 'icd', reason }));
-        }
+        // Z68 is NOT cleared here: it goes with the BMI codes on any visit.
         return out;
     }
 

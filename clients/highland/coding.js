@@ -781,6 +781,19 @@
     // ankylosis, asymptomatic bone-density findings, and instability-not-
     // pain joint findings. Everything else under M is pain-related unless
     // listed here.
+    // Whole code families that are always pain-related.
+    const PAIN_RELATED_ICD_PREFIXES = [
+        'R10.',   // abdominal & pelvic pain
+        'R07.',   // throat & chest pain
+        'R51',    // headache
+        'R52',    // pain, unspecified
+        'G89.',   // chronic / acute pain
+        'G44.',   // other headache syndromes
+        'M54.',   // dorsalgia (neck / back pain, sciatica)
+        'M25.5',  // joint pain
+        'M79.6',  // pain in limb / hand / foot
+        'N94.4', 'N94.5', 'N94.6',  // dysmenorrhea
+    ];
     const NON_PAIN_M_EXACT_CODES = new Set([
         "M67.4", "M72.0", "M79.3",
         "M81.0", "M81.6", "M81.8",
@@ -804,7 +817,9 @@
     function isPainRelatedICDEntry(code, name) {
         const c = (code || "").toUpperCase().trim();
         if (PAIN_RELATED_ICD_CODES.has(c)) return true;
-        if (/\bpain\b/i.test(name || "")) return true;
+        // By CODE only — diagnosis names vary between setups, so the word
+        // "pain" in a name is not used. Whole pain code families instead:
+        if (PAIN_RELATED_ICD_PREFIXES.some(p => c.startsWith(p))) return true;
         if (/^M/i.test(c)) return !isNonPainMCode(c);
         return false;
     }
@@ -940,6 +955,24 @@
     // can still bill G0442 this year, since it never used it. An
     // established patient stays established regardless of this — that
     // status isn't derived from this function.
+    // How many PRIOR encounters in calendar `year` (same insurance) billed
+    // any of `codes`. Each encounter counts once. Used for "N times/year".
+    function countCodeEncountersInYear(codes, year) {
+        const api = window.__ecwPatientHistory;
+        const data = api && api.getData ? api.getData() : null;
+        if (!data || !data.length) return 0;
+        const want = new Set(codes.map(c => c.toUpperCase()));
+        const currentDos = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+        return data.filter(enc => {
+            if (currentDos && enc.encounter_date === currentDos) return false;
+            const ts = parseUSDateSnap(enc.encounter_date);
+            if (!ts || new Date(ts).getFullYear() !== year) return false;
+            if (isDifferentPayerThanCurrent(enc.insurance_name)) return false;
+            return [...(enc.visit_codes || []), ...(enc.procedure_codes || [])]
+                .some(x => want.has(String(x.code || '').trim().toUpperCase()));
+        }).length;
+    }
+
     function codeUsedInYear(code, year) {
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
@@ -1353,7 +1386,7 @@
         '1159F', '1160F',
         '1125F', '1126F',
         '1157F', '1158F', '1170F',
-        'G8510', 'G8431', 'G9622', '3016F',
+        'G8510', 'G8431', 'G9622', '3016F', '3725F',
         'G9275', 'G9276', '1036F', '1000F',
         'G0136', 'G9744', '99051'
         // NOTE: G0444 / G0442 are also deliberately NOT in this set.
@@ -1802,18 +1835,17 @@
         // Under 18: BMI-for-age percentile, not raw BMI. Preferred source
         // is a documented "BMI %:" percentile in the note; if that's not
         // there, falls back to an already-present Z68.51-Z68.54 ICD code. ----
-        const PEDIATRIC_BMI_Z_TO_GCODE = { 'Z68.51': 'G8418', 'Z68.52': 'G8420', 'Z68.53': 'G8417', 'Z68.54': 'G8417' };
+        const PEDIATRIC_BMI_Z_TO_GCODE = { 'Z68.51': 'G8418', 'Z68.52': 'G8420', 'Z68.53': 'G8417', 'Z68.54': 'G8417', 'Z68.55': 'G8417' };
         function pediatricZ68FromPercentile(pct) {
             if (pct == null || isNaN(pct)) return null;
+            if (pct >= 120) return 'Z68.55';   // 120% of the 95th percentile or more
             if (pct < 5) return 'Z68.51';
             if (pct < 85) return 'Z68.52';
             if (pct < 95) return 'Z68.53';
             return 'Z68.54';
         }
-        // Computed independently of hasPreventiveVisit — the ICD
-        // correction below (delete a wrong Z68.xx) must fire regardless
-        // of preventive status, same as the adult flow. Only the CPT
-        // G-code add is gated on hasPreventiveVisit.
+        // Pediatric Z68.5x from the BMI percentile (any visit; the BMI
+        // CPTs below follow the same rule, limited to 4 times per year).
         let correctZ68Ped = null;
         if (bmi && age != null && age < 18) {
             correctZ68Ped = pediatricZ68FromPercentile(parseFloat(bmiPercentile));
@@ -1822,26 +1854,38 @@
                 if (pedZ68Row) correctZ68Ped = pedZ68Row.code.toUpperCase();
             }
         }
-        if (bmi && hasPreventiveVisit && age != null) {
+        // 4 times per calendar year (same insurance): the G-codes
+        // (G8417/G8418/G8420 count together) and 3008F, each on its own.
+        const BMI_YEAR_LIMIT = 4;
+        const bmiYear = getCurrentDosYear();
+        const bmiGTimes = countCodeEncountersInYear(['G8417', 'G8418', 'G8420'], bmiYear);
+        const bmi3008Times = countCodeEncountersInYear(['3008F'], bmiYear);
+        const bmiGLimit = bmiGTimes >= BMI_YEAR_LIMIT;
+        const bmi3008Limit = bmi3008Times >= BMI_YEAR_LIMIT;
+        // Any visit with a documented BMI (no longer only preventive visits).
+        if (bmi && age != null) {
             if (age >= 18) {
-                desired.set('3008F', 'BMI documented (preventive visit)');
+                if (!bmi3008Limit) desired.set('3008F', 'BMI documented');
                 const bmiNum = parseFloat(bmi);
-                const gCode = bmiNum < 18 ? 'G8418' : (bmiNum < 26 ? 'G8420' : 'G8417');
-                desired.set(gCode, `BMI ${bmi} (preventive visit)`);
+                // Up to 18.5 → G8418 · up to 24.99 → G8420 · 25.00+ → G8417
+                const gCode = bmiNum <= 18.5 ? 'G8418' : (bmiNum < 25 ? 'G8420' : 'G8417');
+                if (!bmiGLimit) desired.set(gCode, `BMI ${bmi}`);
             } else if (correctZ68Ped) {
-                desired.set('3008F', 'BMI documented (preventive visit)');
-                desired.set(PEDIATRIC_BMI_Z_TO_GCODE[correctZ68Ped], `Pediatric BMI percentile ${bmiPercentile ? bmiPercentile + '%' : correctZ68Ped} (preventive visit)`);
+                if (!bmi3008Limit) desired.set('3008F', 'BMI documented');
+                if (!bmiGLimit) desired.set(PEDIATRIC_BMI_Z_TO_GCODE[correctZ68Ped], `Pediatric BMI percentile ${bmiPercentile ? bmiPercentile + '%' : correctZ68Ped}`);
             }
         }
-        // If no preventive visit is present, 3008F/G8417/G8418/G8420 are
-        // left out of `desired` entirely — MANAGED_CODES diff below will
-        // flag any of them already on the chart for removal.
+        // No BMI documented (or yearly limit reached) → 3008F/G8417/G8418/
+        // G8420 are left out of `desired` — the MANAGED_CODES diff below
+        // flags any of them already on the chart for removal.
 
         // Deletion reasons override for specific MANAGED_CODES that need
         // more than the generic message (populated below, used in the
         // toDelete diff further down).
         const exclusionReasons = new Map();
         if (weekendBlockReason) exclusionReasons.set('99051', weekendBlockReason);
+        if (bmiGLimit) ['G8417', 'G8418', 'G8420'].forEach(g => exclusionReasons.set(g, `BMI G-code already billed ${bmiGTimes} times in ${bmiYear} — limit is ${BMI_YEAR_LIMIT} per year`));
+        if (bmi3008Limit) exclusionReasons.set('3008F', `3008F already billed ${bmi3008Times} times in ${bmiYear} — limit is ${BMI_YEAR_LIMIT} per year`);
 
         // ---- BP: needs I10, both values under threshold. Yearly limit —
         // the BP qualifier set as a WHOLE can only be used once per
@@ -1963,8 +2007,8 @@
         }
 
         if (age >= 18) {
+            // Negative → G9622. Positive → no result code.
             if (hasAlc === true) desired.set('G9622', 'Alcohol screening negative');
-            else if (hasAlc === false) desired.set('3016F', 'Alcohol screening positive');
         }
 
         // Tobacco/smoking screening result codes share 99406's 18+ age
@@ -2024,14 +2068,29 @@
         // Only when a preventive visit is present on this chart.
         // Still skipped for Medicaid/Medicare/UHC and gated to once/year.
         // Rule 19 age gates apply here too.
-        if (hasPreventiveVisit && annualGCodesEligible(insurance)) {
+        // Screening documented → the annual G-code when it can be billed
+        // (preventive visit, payer allows it, not yet billed this calendar
+        // year on this insurance). When it can't, the replacement code:
+        // 3725F for depression, 3016F for alcohol.
+        {
             const dosYear = getCurrentDosYear();
-            if (age >= 12 && hasDep !== null && !codeUsedInYear('G0444', dosYear)) {
-                desired.set('G0444', 'Annual depression screening (once/year, preventive visit)');
+            const gAllowed = hasPreventiveVisit && annualGCodesEligible(insurance);
+            const whyNot = code => !hasPreventiveVisit ? 'no preventive visit'
+                : !annualGCodesEligible(insurance) ? 'payer does not take it'
+                : `already billed in ${dosYear}`;
+            if (age >= 12 && hasDep !== null) {
+                if (gAllowed && !codeUsedInYear('G0444', dosYear)) {
+                    desired.set('G0444', 'Annual depression screening (once/year per insurance)');
+                } else {
+                    desired.set('3725F', `Depression screening documented — G0444 not billable (${whyNot('G0444')}), 3725F instead`);
+                }
             }
-            // v1.1: G0442 only for a POSITIVE alcohol screen (hasAlc === false).
-            if (age >= 18 && hasAlc === false && !codeUsedInYear('G0442', dosYear)) {
-                desired.set('G0442', 'Annual alcohol screening — positive screen (once/year, preventive visit)');
+            if (age >= 18 && hasAlc !== null) {
+                if (gAllowed && !codeUsedInYear('G0442', dosYear)) {
+                    desired.set('G0442', 'Annual alcohol screening (once/year per insurance)');
+                } else {
+                    desired.set('3016F', `Alcohol screening documented — G0442 not billable (${whyNot('G0442')}), 3016F instead`);
+                }
             }
         }
 
@@ -2197,18 +2256,20 @@
         const bmiNum = parseFloat(bmi) || null;
         const correctZ68 = age >= 18 ? mapBMIToZ68(bmiNum, age) : correctZ68Ped;
         const hasObesityCPTForBMI = rawCPTCodesNow.includes('G0447') && !gating.ob.disabled;
-        const bmiZ68StillNeeded = hasPreventiveVisit || hasObesityCPTForBMI;
+        // No BMI CPT can be billed any more this year (both limits reached)
+        // → the Z68 code goes too, unless Obesity Counseling (G0447) needs it.
+        const bmiYearLimitReached = bmiGLimit && bmi3008Limit;
+        const bmiZ68StillNeeded = (!!bmi && !bmiYearLimitReached) || hasObesityCPTForBMI;
         const currentZ68Entries = getICDRows().filter(e => /^Z68\./i.test(e.code));
         if (!bmiZ68StillNeeded) {
             currentZ68Entries.forEach(e => {
-                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: 'Preventive visit not present and Obesity not billed — BMI code not needed' });
+                toDelete.push({ code: e.code, row: e.row, kind: 'icd', reason: bmi && bmiYearLimitReached ? `BMI codes already billed ${BMI_YEAR_LIMIT} times in ${bmiYear} — BMI ICD not needed` : 'No BMI documented and Obesity not billed — BMI code not needed' });
             });
         } else if (correctZ68) {
             const hasCorrectZ68 = currentZ68Entries.some(e => e.code.toUpperCase() === correctZ68.toUpperCase());
-            // Rule 1: no Z68.xx present at all → don't add it, unless a
-            // preventive visit is being applied this encounter. A WRONG
-            // Z68.xx already present always gets corrected either way.
-            if (!hasCorrectZ68 && (currentZ68Entries.length > 0 || hasPreventiveVisit)) {
+            // BMI documented → the correct Z68.xx is added on any visit,
+            // and a WRONG Z68.xx already present is replaced.
+            if (!hasCorrectZ68) {
                 toAdd.push({ code: correctZ68, reason: `BMI ${age >= 18 ? bmiNum : (bmiPercentile ? bmiPercentile + '%' : correctZ68)} — correct Z68.xx code`, kind: 'icd' });
             }
             currentZ68Entries.forEach(e => {
@@ -2539,15 +2600,16 @@
             });
         }
 
-        // ---- v1.1: G0442 only with a positive alcohol screen ----
-        // A negative screen (G9622) never gets G0442 — remove one already on
-        // the chart. Not documented (null) is left alone.
-        if (hasAlc === true) {
-            const g0442RowNeg = currentRows.find(r => r.code === 'G0442');
-            if (g0442RowNeg && !toDelete.some(d => d.code === 'G0442')) {
-                toDelete.push({ code: 'G0442', row: g0442RowNeg.row, kind: 'cpt', reason: 'Alcohol screening negative — G0442 is only billed for a positive screen' });
+        // ---- Replacement codes: 3725F instead of G0444, 3016F instead of G0442 ----
+        // When the replacement code was chosen (the G-code can't be billed
+        // on this visit), a G-code already on the chart is removed so the
+        // two are never billed together.
+        [['G0444', '3725F'], ['G0442', '3016F']].forEach(([g, repl]) => {
+            if (desired.has(repl) && rawCPTCodesNow.includes(g) && !toDelete.some(d => d.code === g)) {
+                const row = getCPTRowByCode(g);
+                if (row) toDelete.push({ code: g, row, kind: 'cpt', reason: `${g} can't be billed on this visit — ${repl} is used instead` });
             }
-        }
+        });
 
         // ---- G0444/G0442: already billed this calendar year -> delete ----
         // Mirrors the add rule above (only added when NOT already billed
@@ -3163,14 +3225,15 @@
     }
 
     // ====================== PREVENTIVE / COUNSEL / SMOKING / OBESITY ACTIONS ======================
-    // Adult BMI thresholds only (Z68.1-Z68.45, raw BMI number). Pediatric
+    // Adult BMI thresholds only (Z68.18/Z68.19, Z68.20-Z68.45, raw BMI number). Pediatric
     // BMI coding needs age/sex percentile charts (Z68.51-Z68.54) that this
     // script doesn't have data for — returns null under 18 rather than
     // misapplying adult thresholds to a child.
     function mapBMIToZ68(bmi, age) {
         if (age != null && age < 18) return null;
         if (bmi == null || isNaN(bmi)) return null;
-        if (bmi < 20) return "Z68.1"; // v1.11: every adult BMI under 20 (incl. below 19) -> Z68.1
+        if (bmi < 18.5) return "Z68.18";  // 18.4 or less
+        if (bmi < 20) return "Z68.19";    // 18.5 – 19.9
         if (bmi < 30) return `Z68.${Math.floor(bmi)}`;   // Z68.20 .. Z68.29
         if (bmi < 40) return `Z68.${Math.floor(bmi)}`;   // Z68.30 .. Z68.39
         if (bmi < 45) return "Z68.41";

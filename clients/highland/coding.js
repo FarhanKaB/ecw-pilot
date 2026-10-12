@@ -2001,12 +2001,19 @@
         }
 
         // ---- Screenings: alcohol 18+, depression 12+ ----
+        // Depression results (G8510 / G8431): every insurance (UHC's
+        // no-G-codes rule removes them for UHC → 3725F alone there).
+        // Alcohol negative (G9622): only when the insurance takes G-codes
+        // (not Medicare / Medicaid / UHC) — otherwise 3016F alone.
+        const screeningGCodesOk = annualGCodesEligible(insurance);
+        if (!screeningGCodesOk) exclusionReasons.set('G9622',
+            `${insurance || 'This insurance'} does not take G9622 — 3016F is used instead`);
         if (age >= 12) {
             if (hasDep === true) desired.set('G8510', 'Depression screening negative');
             else if (hasDep === false) desired.set('G8431', 'Depression screening positive');
         }
 
-        if (age >= 18) {
+        if (age >= 18 && screeningGCodesOk) {
             // Negative → G9622. Positive → no result code.
             if (hasAlc === true) desired.set('G9622', 'Alcohol screening negative');
         }
@@ -2069,14 +2076,13 @@
         // Still skipped for Medicaid/Medicare/UHC and gated to once/year.
         // Rule 19 age gates apply here too.
         // Screening documented → the annual G-code when it can be billed
-        // (preventive visit, payer allows it, not yet billed this calendar
-        // year on this insurance). When it can't, the replacement code:
-        // 3725F for depression, 3016F for alcohol.
+        // (any visit — not only preventive; payer allows it; not yet billed
+        // this calendar year on this insurance). When it can't, the
+        // replacement code: 3725F for depression, 3016F for alcohol.
         {
             const dosYear = getCurrentDosYear();
-            const gAllowed = hasPreventiveVisit && annualGCodesEligible(insurance);
-            const whyNot = code => !hasPreventiveVisit ? 'no preventive visit'
-                : !annualGCodesEligible(insurance) ? 'payer does not take it'
+            const gAllowed = annualGCodesEligible(insurance);
+            const whyNot = code => !annualGCodesEligible(insurance) ? 'payer does not take it'
                 : `already billed in ${dosYear}`;
             if (age >= 12 && hasDep !== null) {
                 if (gAllowed && !codeUsedInYear('G0444', dosYear)) {
@@ -2085,11 +2091,16 @@
                     desired.set('3725F', `Depression screening documented — G0444 not billable (${whyNot('G0444')}), 3725F instead`);
                 }
             }
+            // Alcohol (3016F = "screening performed"):
+            //   Positive → G0442 (once/year); 3016F when G0442 can't be billed
+            //   Negative → 3016F always (+ G9622 when the insurance takes G-codes, set above)
             if (age >= 18 && hasAlc !== null) {
-                if (gAllowed && !codeUsedInYear('G0442', dosYear)) {
-                    desired.set('G0442', 'Annual alcohol screening (once/year per insurance)');
+                const g0442Billable = gAllowed && !codeUsedInYear('G0442', dosYear);
+                if (hasAlc === false) {
+                    if (g0442Billable) desired.set('G0442', 'Alcohol screening positive (once/year per insurance)');
+                    else desired.set('3016F', `Alcohol screening positive — G0442 not billable (${whyNot('G0442')}), 3016F instead`);
                 } else {
-                    desired.set('3016F', `Alcohol screening documented — G0442 not billable (${whyNot('G0442')}), 3016F instead`);
+                    desired.set('3016F', 'Alcohol screening performed (negative)');
                 }
             }
         }
@@ -2103,7 +2114,8 @@
 
         // United Health Care: no G-prefixed CPT codes at all, for any
         // reason — EXCEPT G0101/G0102/G0103, which UHC does use and which
-        // must never be swept up by this rule.
+        // must never be swept up by this rule. G-codes already on the chart
+        // are removed too (see the UHC chart sweep further down).
         const isUHC = isUHCInsurance(insurance);
         const UHC_GCODE_EXCEPTIONS = new Set(['G0101', 'G0102', 'G0103']);
         if (isUHC) {
@@ -2600,6 +2612,23 @@
                     if (row) toDelete.push({ code, row, kind: 'cpt', reason: 'Medicaid/Medicare — G0444/G0442 not used for this payer' });
                 }
             });
+        }
+
+        // ---- UHC: no G-codes on the claim at all (except G0101/G0102/G0103) ----
+        // The sweep above stops G-codes being ADDED; this removes any that
+        // are already on the chart.
+        if (isUHC) {
+            currentRows.forEach(r => {
+                if (/^G\d/i.test(r.code) && !UHC_GCODE_EXCEPTIONS.has(r.code) && !toDelete.some(d => d.code === r.code)) {
+                    toDelete.push({ code: r.code, row: r.row, kind: 'cpt', reason: `${insurance || 'UHC'} does not take G-codes — ${r.code} removed` });
+                }
+            });
+        }
+
+        // ---- G0442 only for a POSITIVE alcohol screen ----
+        if (hasAlc === true && rawCPTCodesNow.includes('G0442') && !toDelete.some(d => d.code === 'G0442')) {
+            const row = getCPTRowByCode('G0442');
+            if (row) toDelete.push({ code: 'G0442', row, kind: 'cpt', reason: 'Alcohol screening is negative — G0442 is only billed for a positive screen' });
         }
 
         // ---- Replacement codes: 3725F instead of G0444, 3016F instead of G0442 ----

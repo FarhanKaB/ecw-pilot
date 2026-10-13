@@ -2001,19 +2001,16 @@
         }
 
         // ---- Screenings: alcohol 18+, depression 12+ ----
-        // Depression results (G8510 / G8431): every insurance (UHC's
-        // no-G-codes rule removes them for UHC → 3725F alone there).
-        // Alcohol negative (G9622): only when the insurance takes G-codes
-        // (not Medicare / Medicaid / UHC) — otherwise 3016F alone.
-        const screeningGCodesOk = annualGCodesEligible(insurance);
-        if (!screeningGCodesOk) exclusionReasons.set('G9622',
-            `${insurance || 'This insurance'} does not take G9622 — 3016F is used instead`);
+        // Result codes, every insurance (UHC's no-G-codes rule removes them
+        // for UHC → 3725F / 3016F alone there):
+        //   depression: G8510 negative / G8431 positive
+        //   alcohol:    G9622 negative (with 3016F = screening performed)
         if (age >= 12) {
             if (hasDep === true) desired.set('G8510', 'Depression screening negative');
             else if (hasDep === false) desired.set('G8431', 'Depression screening positive');
         }
 
-        if (age >= 18 && screeningGCodesOk) {
+        if (age >= 18) {
             // Negative → G9622. Positive → no result code.
             if (hasAlc === true) desired.set('G9622', 'Alcohol screening negative');
         }
@@ -2093,7 +2090,7 @@
             }
             // Alcohol (3016F = "screening performed"):
             //   Positive → G0442 (once/year); 3016F when G0442 can't be billed
-            //   Negative → 3016F always (+ G9622 when the insurance takes G-codes, set above)
+            //   Negative → 3016F (screening performed) + G9622 (negative, set above)
             if (age >= 18 && hasAlc !== null) {
                 const g0442Billable = gAllowed && !codeUsedInYear('G0442', dosYear);
                 if (hasAlc === false) {

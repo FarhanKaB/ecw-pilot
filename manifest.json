@@ -33,8 +33,9 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.30",
+          "version": "1.31",
           "notes": [
+            "Dragging opens a gap and the other rows slide aside; ↑ ↓ slide the rows too. The ↑ ↓ × buttons are now clearly visible",
             "Manual order: drag codes (or use ↑ ↓) in 'After changes'; applied on Add to EMR. 'Reset order' goes back to ECW Pilot's order",
             "Manual remove: × on any code in 'After changes' removes it on Add to EMR and stops ECW Pilot proposing it again for this visit; ↺ puts it back",
             "Chief complaint is read from eCW's data for the OPEN visit (getEncounterDetails) — never from page text",

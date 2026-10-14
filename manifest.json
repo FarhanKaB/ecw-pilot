@@ -11,9 +11,9 @@
     "sort": {
       "label": "Smart Sort",
       "path": "shared/sort.js",
-      "version": "1.8",
+      "version": "1.9",
       "notes": [
-        "Keeps the coder's own order from the coding panel (primary diagnosis still on row 1)"
+        "Removes an SL modifier when the patient is 18 or older (keeps it under 18)"
       ]
     },
     "claimLink": {
@@ -33,8 +33,9 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.31",
+          "version": "1.32",
           "notes": [
+            "Vaccine admin: 90460/90461 for ages 0–18, 90471/90472 from 19 (same ages as SL). Added 90694 (adjuvanted flu): 1 component, G0008 for Medicare",
             "Dragging opens a gap and the other rows slide aside; ↑ ↓ slide the rows too. The ↑ ↓ × buttons are now clearly visible",
             "Manual order: drag codes (or use ↑ ↓) in 'After changes'; applied on Add to EMR. 'Reset order' goes back to ECW Pilot's order",
             "Manual remove: × on any code in 'After changes' removes it on Add to EMR and stops ECW Pilot proposing it again for this visit; ↺ puts it back",
@@ -50,8 +51,9 @@
         "link": {
           "label": "Link",
           "path": "clients/highland/link.js",
-          "version": "1.8",
+          "version": "1.9",
           "notes": [
+            "SL modifier only for patients under 18 (age on the visit day)",
             "Age on the VISIT day from eCW's Angular data only; DOB cross-checked between patient and visit records"
           ]
         }

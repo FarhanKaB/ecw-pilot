@@ -11,9 +11,9 @@
     "sort": {
       "label": "Smart Sort",
       "path": "shared/sort.js",
-      "version": "1.7",
+      "version": "1.8",
       "notes": [
-        "Z68.18 / Z68.19 sort to the bottom with the other BMI codes"
+        "Keeps the coder's own order from the coding panel (primary diagnosis still on row 1)"
       ]
     },
     "claimLink": {
@@ -33,8 +33,9 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.29",
+          "version": "1.30",
           "notes": [
+            "Manual order: drag codes (or use ↑ ↓) in 'After changes'; applied on Add to EMR. 'Reset order' goes back to ECW Pilot's order",
             "Manual remove: × on any code in 'After changes' removes it on Add to EMR and stops ECW Pilot proposing it again for this visit; ↺ puts it back",
             "Chief complaint is read from eCW's data for the OPEN visit (getEncounterDetails) — never from page text",
             "Vitals (BP, BMI, BMI %) are read from eCW's Vitals data for the OPEN visit only — never from page text; while they load, no changes are proposed",

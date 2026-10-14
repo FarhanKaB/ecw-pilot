@@ -261,6 +261,14 @@
         #smcPanel .smc-row.del .smc-why { color: var(--smc-del); }
         #smcPanel .smc-row.del input { accent-color: var(--smc-del); }
         #smcPanel .smc-row.del.off { background: transparent; }
+        #smcPanel .smc-row.has-rm { position: relative; padding-right: 28px; }
+        #smcPanel .smc-rm { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: var(--smc-ink-3); font-size: 15px; line-height: 1; cursor: pointer; opacity: .55; }
+        #smcPanel .smc-row:hover .smc-rm, #smcPanel .smc-rm:focus-visible { opacity: 1; }
+        #smcPanel .smc-rm:hover { background: var(--smc-del-soft); color: var(--smc-del); }
+        #smcPanel .smc-manual { padding: 6px 10px; font-size: 11.5px; color: var(--smc-ink-3); border-top: 1px dashed var(--smc-line-2); }
+        #smcPanel .smc-manual-code { display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; font-weight: 600; color: var(--smc-del); }
+        #smcPanel .smc-undo { border: 0; background: transparent; color: var(--smc-ink-2); cursor: pointer; font-size: 13px; padding: 0 2px; }
+        #smcPanel .smc-undo:hover { color: var(--smc-ink); }
         #smcPanel .smc-row.del.off .smc-code > b { color: var(--smc-ink); text-decoration: none; }
         #smcPanel .smc-row.del.off .smc-why { color: var(--smc-ink-3); }
         #smcPanel .smc-row.add { background: var(--smc-add-soft); }
@@ -499,17 +507,214 @@
         return age;
     }
 
-    // Primary age source for all age-dependent logic: DOB parsed from the
-    // page, computed as of the current DOS (not today's real-world date).
-    // Falls back to the old "(43 yo)" text-scan only if DOB parsing fails.
-    function getAgeAtDOS(text) {
-        const dob = parseDOBFromPage(text);
-        if (dob) {
-            const age = calculateAgeAtDate(dob, getCurrentDosDate());
-            if (age != null && age >= 0 && age < 150) return age;
+    // ====================== AGE ON THE DAY OF THE VISIT ======================
+    // Age always = DOB vs. the date of the VISIT being coded — never today's
+    // date (a chart coded after the patient's birthday must still use the age
+    // they were on the visit day), and never the "(18 yo)" header text (that
+    // is the age TODAY). Unknown → null, so age rules are skipped, not guessed.
+    function ecwParseDate(v) {
+        const s = String(v == null ? '' : v).trim();
+        let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) return new Date(+m[3], +m[1] - 1, +m[2]);
+        m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+        return null;
+    }
+    function ecwScopeValue(key) {
+        let found;
+        for (const el of document.querySelectorAll('.ng-scope')) {
+            try {
+                for (let s = window.angular && angular.element(el).scope(); s; s = s.$parent) {
+                    if (s[key] != null) { found = s[key]; break; }
+                }
+            } catch (e) {}
+            if (found != null) break;
         }
-        const textAge = getAge(text);
-        return textAge ? parseInt(textAge) : null;
+        return found;
+    }
+    // Date of birth — Angular only: eCW's patient record, then the open
+    // visit's own copy (roomAndStatus.encounterObj.dob).
+    // If both copies exist they must agree — a mismatch means one is left
+    // over from the previous patient, so the age is treated as unknown.
+    function getPatientDOB() {
+        const p = ecwScopeValue('patientobj');
+        const enc = getOpenEncounterObj();
+        const d1 = p && ecwParseDate(p.DATE_OF_BIRTH);
+        const d2 = enc && ecwParseDate(enc.dob);
+        const ok1 = d1 && !isNaN(d1), ok2 = d2 && !isNaN(d2);
+        if (ok1 && ok2 && +d1 !== +d2) return null;
+        return ok1 ? d1 : (ok2 ? d2 : null);
+    }
+    // The open visit — Angular only: roomAndStatus.encounterObj, accepted
+    // only when its encounterId matches eCW's current encounterId.
+    function getOpenEncounterObj() {
+        const ras = ecwScopeValue('roomAndStatus');
+        const enc = ras && ras.encounterObj;
+        if (!enc || typeof enc !== 'object') return null;
+        const curId = ecwScopeValue('encounterId');
+        if (curId != null && String(curId) !== String(enc.encounterId)) return null;
+        return enc;
+    }
+    // Date of the visit being coded — Angular only (encDate / date of the
+    // open visit). Never "today", never page text.
+    function getVisitDateForAge() {
+        const enc = getOpenEncounterObj();
+        const d = enc && (ecwParseDate(enc.encDate) || ecwParseDate(enc.date));
+        return d && !isNaN(d) ? d : null;
+    }
+    function ageOnVisitDay() {
+        const dob = getPatientDOB(), visit = getVisitDateForAge();
+        if (!dob || !visit) return null;
+        let age = visit.getFullYear() - dob.getFullYear();
+        if (visit.getMonth() < dob.getMonth() || (visit.getMonth() === dob.getMonth() && visit.getDate() < dob.getDate())) age--;
+        return age >= 0 && age < 150 ? age : null;
+    }
+
+    // ====================== VITALS OF THE OPEN VISIT ======================
+    // Read from eCW's own Vitals data (getVitalValues.jsp — what the Vitals
+    // section uses), for the OPEN visit only: the reply lists several
+    // visits, and only the block whose encounterid equals the open visit is
+    // used. Never page text. Vitals are matched by NAME from eCW's vital
+    // list (BP, BMI, BMI %), with the known IDs as a backup.
+    const VITALS_TTL_MS = 30000;
+    const VITAL_ID_FALLBACK = { bp: '212', bmi: '170669' };
+    const vitalsCache = new Map();      // encounterId -> { state, at, bp, bmi, bmiPct }
+    let vitalNamesById = null, vitalNamesPromise = null;
+    function loadVitalNames() {
+        if (vitalNamesById) return Promise.resolve(vitalNamesById);
+        if (vitalNamesPromise) return vitalNamesPromise;
+        vitalNamesPromise = fetch(makeURL('/mobiledoc/jsp/catalog/xml/getVitalNames.jsp'), { credentials: 'include' })
+            .then(r => r.ok ? r.text() : '')
+            .then(t => {
+                const d = new DOMParser().parseFromString(t, 'text/xml'), m = {};
+                [...d.getElementsByTagName('*')].filter(n => n.children.length).forEach(n => {
+                    const id = n.querySelector(':scope > vitalId, :scope > id, :scope > Id, :scope > vitalid')?.textContent.trim();
+                    const nm = n.querySelector(':scope > name, :scope > Name, :scope > vitalName, :scope > vitalname')?.textContent.trim();
+                    if (id && nm) m[id] = nm;
+                });
+                vitalNamesById = m;
+                return m;
+            })
+            .catch(() => ({}))
+            .finally(() => { vitalNamesPromise = null; });
+        return vitalNamesPromise;
+    }
+    // Pull BP / BMI / BMI % for one visit out of a getVitalValues reply.
+    function parseVisitVitals(xmlText, encounterId, names) {
+        const d = new DOMParser().parseFromString(xmlText, 'text/xml');
+        const idNode = [...d.getElementsByTagName('encounterid')].find(n => n.textContent.trim() === String(encounterId));
+        if (!idNode) return { bp: null, bmi: null, bmiPct: null, found: false };
+        const block = idNode.parentNode;
+        const out = { bp: null, bmi: null, bmiPct: null, found: true };
+        [...block.getElementsByTagName('vitalId')].forEach(v => {
+            const id = v.textContent.trim();
+            const item = v.parentNode;
+            const raw = (item.getElementsByTagName('value')[0]?.textContent || '').trim();
+            if (!raw) return;
+            const name = String(names[id] || '').trim();
+            if ((/^BP$/i.test(name) || (!name && id === VITAL_ID_FALLBACK.bp)) && /^\d{2,3}\s*\/\s*\d{2,3}$/.test(raw)) {
+                out.bp = raw.replace(/\s+/g, '');
+            } else if (/^BMI\s*(%|percentile|pct)/i.test(name)) {
+                const n = parseFloat(raw); if (!isNaN(n)) out.bmiPct = String(n);
+            } else if (/^BMI$/i.test(name) || (!name && id === VITAL_ID_FALLBACK.bmi)) {
+                const n = parseFloat(raw); if (!isNaN(n)) out.bmi = String(n);
+            }
+        });
+        return out;
+    }
+    function loadVisitVitals(encId, patientId) {
+        const entry = vitalsCache.get(encId) || {};
+        if (entry.loading) return;
+        entry.loading = true;
+        if (!entry.state) entry.state = 'loading';
+        vitalsCache.set(encId, entry);
+        const url = `/mobiledoc/jsp/catalog/xml/getVitalValues.jsp?patientId=${encodeURIComponent(patientId)}&encounterId=${encodeURIComponent(encId)}&encIndex=0&moduleName=`;
+        Promise.all([loadVitalNames(), fetch(makeURL(url), { credentials: 'include' }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })])
+            .then(([names, xml]) => {
+                const v = parseVisitVitals(xml, encId, names);
+                // The open visit must be in eCW's reply — otherwise "no vitals"
+                // can't be told apart from "not loaded", so nothing is proposed.
+                if (!v.found) throw new Error('open visit not in the vitals reply');
+                Object.assign(entry, { state: 'ready', at: Date.now(), bp: v.bp, bmi: v.bmi, bmiPct: v.bmiPct });
+            })
+            .catch(err => {
+                console.warn('[ECW Pilot] Could not load the vitals of this visit', err);
+                if (entry.state !== 'ready') entry.state = 'failed';
+                entry.at = Date.now();
+            })
+            .finally(() => {
+                entry.loading = false;
+                try { renderPanel(true); } catch (e) {}
+            });
+    }
+    // { state: 'ready' | 'loading' | 'failed', bp, bmi, bmiPct } for the open visit.
+    function getVisitVitals() {
+        const enc = getOpenEncounterObj();
+        if (!enc || enc.encounterId == null || enc.patientId == null) return { state: 'failed', bp: null, bmi: null, bmiPct: null };
+        const encId = String(enc.encounterId);
+        const entry = vitalsCache.get(encId);
+        if (!entry || (!entry.loading && Date.now() - (entry.at || 0) > VITALS_TTL_MS)) loadVisitVitals(encId, enc.patientId);
+        const e = vitalsCache.get(encId);
+        return { state: e.state, bp: e.bp ?? null, bmi: e.bmi ?? null, bmiPct: e.bmiPct ?? null };
+    }
+
+    // ====================== CHIEF COMPLAINT OF THE OPEN VISIT ======================
+    // From eCW's own service (getEncounterDetails.jsp, Columns=chiefComplaint)
+    // for the OPEN visit's ID — the reply's id must equal that visit, or the
+    // CC counts as not loaded. Never page text. Line breaks are kept.
+    const ccCache = new Map();          // encounterId -> { state, at, text }
+    function ccToText(raw) {
+        const html = String(raw || '')
+            .replace(/<\s*br\s*\/?>/gi, '\n')
+            .replace(/<\/\s*(li|p|div|tr)\s*>/gi, '\n')
+            .replace(/<[^>]+>/g, ' ');
+        const box = document.createElement('textarea');
+        box.innerHTML = html;                       // decodes &amp; &nbsp; etc. (no scripts run in a textarea)
+        return box.value.split(/\r?\n/).map(l => l.replace(/[ \t\u00a0]+/g, ' ').trim()).filter(Boolean).join('\n');
+    }
+    function loadVisitCC(encId) {
+        const entry = ccCache.get(encId) || {};
+        if (entry.loading) return;
+        entry.loading = true;
+        if (!entry.state) entry.state = 'loading';
+        ccCache.set(encId, entry);
+        const uid = ecwScopeValue('encDtForTreatmentScreen')?.nTrUserId || '';
+        const url = `/mobiledoc/jsp/catalog/xml/getEncounterDetails.jsp?Id=${encodeURIComponent(encId)}&TrUserId=${encodeURIComponent(uid)}&Columns=chiefComplaint,chieficds&transitionofcare=1`;
+        fetch(makeURL(url), { credentials: 'include' })
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+            .then(xml => {
+                const d = new DOMParser().parseFromString(xml, 'text/xml');
+                const id = d.getElementsByTagName('id')[0]?.textContent.trim();
+                if (id !== String(encId)) throw new Error('reply is not for the open visit');
+                Object.assign(entry, { state: 'ready', at: Date.now(), text: ccToText(d.getElementsByTagName('chiefComplaint')[0]?.textContent) });
+            })
+            .catch(err => {
+                console.warn('[ECW Pilot] Could not load the chief complaint of this visit', err);
+                if (entry.state !== 'ready') entry.state = 'failed';
+                entry.at = Date.now();
+            })
+            .finally(() => {
+                entry.loading = false;
+                try { renderPanel(true); } catch (e) {}
+            });
+    }
+    // { state: 'ready' | 'loading' | 'failed', text } for the open visit.
+    function getVisitCC() {
+        const enc = getOpenEncounterObj();
+        if (!enc || enc.encounterId == null) return { state: 'failed', text: '' };
+        const encId = String(enc.encounterId);
+        const entry = ccCache.get(encId);
+        if (!entry || (!entry.loading && Date.now() - (entry.at || 0) > VITALS_TTL_MS)) loadVisitCC(encId);
+        const e = ccCache.get(encId);
+        return { state: e.state, text: e.text || '' };
+    }
+
+    // All age-dependent rules use the age ON THE VISIT DAY (see above).
+    // `text` is no longer used (the old header/"yo" text scan is gone).
+    function getAgeAtDOS(text) {
+        const age = ageOnVisitDay();
+        if (age == null) console.warn('[ECW Pilot] Could not read the DOB or the visit date — age rules skipped');
+        return age;
     }
 
     function snapshotExtract(str, regex) {
@@ -1687,13 +1892,36 @@
 
     // Current-medication rules removed entirely (not used).
 
+    let lastAgeUnknownKey = null;
     function computeAnalysis() {
         const text = getEncounterText();
         const insurance = parseInsuranceFromPage(text);
-        const bp = snapshotExtract(text, /BP:\s*(\d{2,3}\/\s*\d{2,3})/i);
-        const bmi = snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i);
-        const bmiPercentile = snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i);
-        const age = getAgeAtDOS(text) ?? 0;
+        // Vitals of the OPEN visit, from eCW's Vitals data (never page text).
+        const visitVitals = getVisitVitals();
+        const bp = visitVitals.bp;
+        const bmi = visitVitals.bmi;
+        const bmiPercentile = visitVitals.bmiPct;
+        const age = getAgeAtDOS(text);
+        if (age == null) {
+            const key = String(ecwScopeValue('encounterId') ?? location.href);
+            if (lastAgeUnknownKey !== key) {
+                lastAgeUnknownKey = key;
+                showQuickNotice("ECW Pilot can't read the patient's date of birth or the visit date — no changes proposed. Re-open the chart and try again.");
+            }
+            return { toAdd: [], toDelete: [], insurance, ageUnknown: true };
+        }
+        const visitCC = getVisitCC();
+        if (visitCC.state !== 'ready') return { toAdd: [], toDelete: [], insurance, ccPending: visitCC.state };
+        if (visitVitals.state !== 'ready') {
+            if (visitVitals.state === 'failed') {
+                const key = 'vitals:' + String(ecwScopeValue('encounterId') ?? location.href);
+                if (lastAgeUnknownKey !== key) {
+                    lastAgeUnknownKey = key;
+                    showQuickNotice("ECW Pilot can't load this visit's vitals — no changes proposed. Re-open the chart and try again.");
+                }
+            }
+            return { toAdd: [], toDelete: [], insurance, vitalsPending: visitVitals.state };
+        }
         const gender = getGenderFromDOM();
 
         // Insurance sometimes renders as "Health First" (with a space) instead
@@ -1946,18 +2174,9 @@
         }
 
         // ---- Blood draw / EKG in CC — 36415/99000 no longer auto-added; EKG → 93000 ----
-        const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
-        const ccText = ccRaw ? ccRaw[1] : '';
-        // CC entries sometimes render as tracked-change <li> elements
-        // (e.g. <li section="Chief Complaint(s):" content="EKG done">)
-        // rather than as plain visible text — those don't reliably show up
-        // in document.body.innerText, so the regex above alone can miss
-        // them. Read those elements directly as a second signal.
-        const ccDomItems = document.querySelectorAll('[section="Chief Complaint(s):"]');
-        const ccDomText = ccDomItems.length
-            ? Array.from(ccDomItems).map(el => el.getAttribute('content') || el.textContent || '').join(' ')
-            : '';
-        if (/\bekg\b|\becg\b/i.test(ccText) || /\bekg\b|\becg\b/i.test(ccDomText)) {
+        // Chief complaint of the OPEN visit, from eCW's data (never page text).
+        const ccText = getVisitCC().text;
+        if (/\bekg\b|\becg\b/i.test(ccText)) {
             desired.set('93000', 'EKG mentioned in CC');
         }
 
@@ -3274,8 +3493,7 @@
     }
 
     function getChiefComplaintTextFast(text) {
-        const m = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
-        return m ? m[1] : "";
+        return getVisitCC().text;
     }
 
     function getICDGridEntriesFast() {
@@ -3713,9 +3931,11 @@
         // here at all (falls through to the other conditions below)
         // rather than wrongly falling back to the adult scale. Adults keep
         // the existing raw-BMI<30 rule, unchanged.
-        const obAge = getAgeAtDOS(text) ?? 0;
-        const obBmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
-        const obBmiPercentile = parseFloat(snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i)) || null;
+        const obAgeRaw = getAgeAtDOS(text);
+        const obAge = obAgeRaw ?? 0;
+        const obVitals = getVisitVitals();
+        const obBmi = parseFloat(obVitals.bmi) || null;
+        const obBmiPercentile = parseFloat(obVitals.bmiPct) || null;
         const obBmiBlocked = obAge < 18
             ? (obBmiPercentile != null && obBmiPercentile < 95)
             : (obBmi != null && obBmi < 30);
@@ -3731,7 +3951,9 @@
         // immediately with a clear reason when BMI genuinely isn't there.
         const obBmiMissing = obAge < 18 ? (obBmiPercentile == null) : (obBmi == null);
         let ob = { disabled: false, title: 'Obesity Counseling' };
-        if (obBmiMissing) {
+        if (obAgeRaw == null) {
+            ob = { disabled: true, title: "Patient's age on the visit day could not be read" };
+        } else if (obBmiMissing) {
             ob = { disabled: true, title: 'Obesity Counseling requires a documented BMI on this encounter' };
         } else if (obBmiBlocked) {
             ob = { disabled: true, title: obBmiBlockTitle };
@@ -4049,7 +4271,7 @@
 
         const age = getAgeAtDOS(text);
         const gender = getGenderFromDOM();
-        const bmi = parseFloat(snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i)) || null;
+        const bmi = parseFloat(getVisitVitals().bmi) || null;
         const ccText = getChiefComplaintTextFast(text);
         const icdEntries = getICDGridEntriesFast();
         const toAdd = [];
@@ -4103,7 +4325,7 @@
         } else if (kind === 'ob') {
             if (insurance && /medicaid/i.test(insurance.trim())) return { error: 'Not applicable for Medicaid' };
             if (age != null && age < 18) {
-                const pct = parseFloat(snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i)) || null;
+                const pct = parseFloat(getVisitVitals().bmiPct) || null;
                 if (pct == null) return { error: 'BMI percentile not found on this note' };
                 if (pct < 95) return { error: `BMI percentile ${pct}% is under the 95th percentile` };
             } else {
@@ -4152,6 +4374,10 @@
 
     // ====================== PROPOSAL (analysis + quick plan) ======================
     let pick = {};              // 'a:CODE' / 'd:CODE' -> true (apply) / false (skip)
+    // Codes the coder removed by hand (× in the panel), for this visit only:
+    // removed from the claim on Add to EMR, and never proposed again while
+    // the visit is open. Nothing is saved.  CODE -> { kind: 'icd' | 'cpt' }
+    let manualDel = new Map();
     let lastAnalysisSig = '';
     let lastEncounterKey = '';
     let resultNotice = null;    // { ok, lines[] } shown after Add to EMR
@@ -4319,6 +4545,18 @@
         // Excluded codes are never added or removed.
         toAdd = toAdd.filter(a => !isExcludedCode(a));
         toDelete = toDelete.filter(d => !isExcludedCode(d));
+        // Removed by the coder (×): the coder's choice wins over every rule.
+        // Never proposed again, and removed from the claim if it's there.
+        if (manualDel.size) {
+            toAdd = toAdd.filter(a => !manualDel.has(a.code.toUpperCase()));
+            manualDel.forEach((m, code) => {
+                const onChart = m.kind === 'icd' ? icdNow.has(code) : cptNow.has(code);
+                if (!onChart) return;
+                const existing = toDelete.find(d => d.code.toUpperCase() === code);
+                if (existing) { existing.manual = true; existing.reason = 'Removed by you'; }
+                else toDelete.push({ code, kind: m.kind, reason: 'Removed by you', manual: true });
+            });
+        }
         return { toAdd, toDelete };
     }
 
@@ -4582,14 +4820,16 @@
         if (!items.length) return `<div class="smc-empty">Nothing left</div>`;
         const pred = rank === icdRank ? predictedPrimary(current, adds, dels) : null;
         const pTagFor = code => (pred && pred.code === code ? primaryTag(pred.will, pred.why) : '');
+        const rmKind = rank === icdRank ? 'icd' : 'cpt';
+        const rmBtn = code => `<button type="button" class="smc-rm" data-act="manual-del" data-code="${escapeHtml(code)}" data-kind="${rmKind}" title="Remove ${escapeHtml(code)} (applied on Add to EMR)" aria-label="Remove ${escapeHtml(code)}">×</button>`;
         const pCls = code => (pred && pred.code === code ? 'primary' : '');
         let n = 0;
         return items.map(x => {
             if (x.t === 'kept') {
                 n++;
                 const units = x.units && x.units !== 1 ? `<span class="smc-tag">× ${x.units}</span>` : '';
-                return `<div class="smc-row ${pCls(x.code)}"><span class="mk"><span class="smc-num">${n}</span></span>
-                    <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}${pTagFor(x.code)}</div><div class="smc-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</div></div></div>`;
+                return `<div class="smc-row has-rm ${pCls(x.code)}"><span class="mk"><span class="smc-num">${n}</span></span>
+                    <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}${pTagFor(x.code)}</div><div class="smc-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</div></div>${rmBtn(x.code)}</div>`;
             }
             const on = isPicked('a', x);
             if (on) n++;
@@ -4605,10 +4845,10 @@
             const nameLine = billingName
                 ? `<div class="smc-name" title="${escapeHtml(billingName)}">${escapeHtml(billingName)}</div>`
                 : '';
-            return `<label class="smc-row add ${on ? '' : 'off'} ${x.needsReview ? 'review' : ''} ${pCls(code)}" title="${escapeHtml(billingName ? billingName + ' — ' + x.reason : x.reason)}">
+            return `<label class="smc-row add has-rm ${on ? '' : 'off'} ${x.needsReview ? 'review' : ''} ${pCls(code)}" title="${escapeHtml(billingName ? billingName + ' — ' + x.reason : x.reason)}">
                 <span class="mk"><input type="checkbox" data-k="${escapeHtml(keyOf('a', x.code))}" ${on ? 'checked' : ''} aria-label="Add ${escapeHtml(x.code)}"></span>
                 <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${tags}${pTagFor(code)}</div>${nameLine}
-                <div class="smc-why">${escapeHtml(x.reason)}</div></div></label>`;
+                <div class="smc-why">${escapeHtml(x.reason)}</div></div>${rmBtn(code)}</label>`;
         }).join('');
     }
 
@@ -4635,8 +4875,15 @@
             <div class="smc-diff">
                 <div class="smc-col"><div class="smc-col-h">Current <span>${current.length}</span></div>${currentColumnHtml(current, dels, rank === icdRank)}</div>
                 <div class="smc-col"><div class="smc-col-h">After changes <span>${afterCount(current, adds, dels)}</span></div>${afterColumnHtml(current, adds, dels, rank)}</div>
-            </div>${extra || ''}
+            </div>${manualRemovedHtml(rank === icdRank ? 'icd' : 'cpt')}${extra || ''}
         </div>`;
+    }
+
+    function manualRemovedHtml(kind) {
+        const codes = [...manualDel].filter(([, m]) => m.kind === kind).map(([code]) => code);
+        if (!codes.length) return '';
+        return `<div class="smc-manual">Removed by you: ${codes.map(code =>
+            `<span class="smc-manual-code">${escapeHtml(code)}<button type="button" class="smc-undo" data-act="manual-undo" data-code="${escapeHtml(code)}" title="Put ${escapeHtml(code)} back" aria-label="Put ${escapeHtml(code)} back">↺</button></span>`).join(' ')}</div>`;
     }
 
     function contextHtml() {
@@ -4648,19 +4895,19 @@
         const age = getAgeAtDOS(text);
         const isPediatric = age != null && age > 0 && age < 18;
 
-        const ccRaw = text.match(/Chief Complaint\(s\)\s*:?\s*([\s\S]+?)(?=\n\s*\n|\n\s*(?:Subjective|Objective|HPI|History|Assessment|Plan|Review|Physical|Vital|Social|Family|Medical|Surgical)\b|$)/i);
-        const ccLines = ccRaw ? ccRaw[1].split(/\r?\n/).map(l => l.replace(/^[\s•\-\*·]+/, '').trim()).filter(Boolean) : [];
+        const ccLines = getVisitCC().text.split(/\r?\n/).map(l => l.replace(/^[\s•\-\*·]+/, '').trim()).filter(Boolean);
 
         const chips = [];
-        const bp = snapshotExtract(text, /BP:\s*(\d{2,3}\/\s*\d{2,3})/i);
+        const dispVitals = getVisitVitals();
+        const bp = dispVitals.bp;
         if (bp) {
             const [sys, dia] = bp.split('/').map(n => parseInt(n));
             const high = sys > 139 || dia > 89;
             // v1.6: reading only — no quality codes on the pill.
             chips.push(`<span class="smc-chip ${high ? 'bad' : ''}"><b>BP</b> ${escapeHtml(bp)}</span>`);
         }
-        const bmi = snapshotExtract(text, /BMI:\s*(\d{1,3}(?:\.\d{1,2})?)/i);
-        const bmiPct = snapshotExtract(text, /BMI\s*%:\s*(\d{1,3}(?:\.\d{1,2})?)\s*%/i);
+        const bmi = dispVitals.bmi;
+        const bmiPct = dispVitals.bmiPct;
         if (isPediatric && bmiPct) {
             const p = parseFloat(bmiPct);
             chips.push(`<span class="smc-chip ${p >= 95 ? 'bad' : (p >= 85 ? 'warn' : '')}"><b>BMI</b> ${escapeHtml(bmiPct)}%</span>`);
@@ -4869,6 +5116,13 @@
                 : `Waiting for patient history — ${p.completed || 0} of ${p.total || '?'} visits loaded` };
         }
         if (!(api.getData && api.getData())) return { ready: false, text: 'Waiting for patient history to start loading…' };
+        // This visit's vitals (BP / BMI / BMI %) must be loaded too.
+        const vv = getVisitVitals();
+        if (vv.state === 'loading') return { ready: false, text: "Loading this visit's vitals…" };
+        if (vv.state === 'failed') return { ready: false, text: "Couldn't load this visit's vitals — no changes proposed. Re-open the chart to try again." };
+        const cc = getVisitCC();
+        if (cc.state === 'loading') return { ready: false, text: "Loading this visit's chief complaint…" };
+        if (cc.state === 'failed') return { ready: false, text: "Couldn't load this visit's chief complaint — no changes proposed. Re-open the chart to try again." };
         return { ready: true };
     }
 
@@ -5096,7 +5350,7 @@
         const encKey = getEncounterKey();
         if (encKey !== lastEncounterKey) {
             lastEncounterKey = encKey;
-            pick = {}; activeQuick = null; activePlan = null;
+            pick = {}; manualDel = new Map(); activeQuick = null; activePlan = null;
             analysisState = null; lastAnalysisSig = ''; resultNotice = null; reviewState = null; reorderTriedSig = ''; smartTriedSig = '';
         }
     }
@@ -5107,7 +5361,7 @@
         if (!launcher || !launcher.classList.contains('show')) return;
         const badge = launcher.querySelector('.smc-l-badge');
         const api = window.__ecwPatientHistory;
-        const loading = !!(api && api.isLoading && api.isLoading());
+        const loading = !!(api && api.isLoading && api.isLoading()) || (hasBillingGrids() && (getVisitVitals().state === 'loading' || getVisitCC().state === 'loading'));
         let count = 0;
         if (!loading && hasBillingGrids() && !actionRunning) {
             syncEncounterState();
@@ -5246,6 +5500,18 @@
                 else if (act.dataset.act === 'reload') location.reload();
                 else if (act.dataset.act === 'dismiss') { resultNotice = null; renderPanel(); }
                 else if (act.dataset.act === 'ack-update') { if (PILOT && PILOT.ackUpdate) PILOT.ackUpdate(); renderPanel(true); }
+                else if (act.dataset.act === 'manual-del') {
+                    e.preventDefault();
+                    const code = String(act.dataset.code || '').toUpperCase();
+                    if (code) { manualDel.set(code, { kind: act.dataset.kind === 'icd' ? 'icd' : 'cpt' }); pick[keyOf('d', code)] = true; }
+                    renderPanel(true);
+                }
+                else if (act.dataset.act === 'manual-undo') {
+                    e.preventDefault();
+                    const code = String(act.dataset.code || '').toUpperCase();
+                    manualDel.delete(code); delete pick[keyOf('d', code)]; delete pick[keyOf('a', code)];
+                    renderPanel(true);
+                }
                 else if (act.dataset.act === 'toggle-all') {
                     const prop = buildProposal();
                     const items = [...prop.toAdd.map(a => ['a', a]), ...prop.toDelete.map(d => ['d', d])];

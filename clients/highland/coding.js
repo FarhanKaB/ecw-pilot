@@ -1643,6 +1643,7 @@
         // Influenza (all single-component)
         '90656': 1, '90657': 1, '90658': 1, '90660': 1, '90661': 1,
         '90672': 1, '90674': 1, '90682': 1, '90685': 1, '90686': 1,
+        '90694': 1,   // influenza, adjuvanted (Fluad) — 1 component
         '90687': 1, '90688': 1, '90756': 1
     };
     // COVID vaccines are never counted via 90460-90474 — always 90480,
@@ -1650,7 +1651,7 @@
     const COVID_VACCINE_CODES = new Set(['91319', '91320', '91321', '91322', '91323', '91304']);
     // Medicare-only overrides (no age limit) — these use their own G-codes
     // instead of the standard 90460-90474 scheme, for Medicare patients only.
-    const FLU_VACCINE_CODES = new Set(['90656', '90657', '90658', '90660', '90661', '90672', '90674', '90682', '90685', '90686', '90687', '90688', '90756']);
+    const FLU_VACCINE_CODES = new Set(['90656', '90657', '90658', '90660', '90661', '90672', '90674', '90682', '90685', '90686', '90687', '90688', '90694', '90756']);
     const PNEUMOCOCCAL_VACCINE_CODES = new Set(['90670', '90671', '90677', '90732']);
     const HEPB_VACCINE_CODES = new Set(['90740', '90743', '90744', '90746', '90747']);
     // Every admin code this feature manages — used to find stale/wrong ones.
@@ -1729,7 +1730,8 @@
 
         if (otherVaccineRows.length) {
             const vaccineCount = otherVaccineRows.length;
-            if (age != null && age >= 18) {
+            // Adult admin codes from 19; 0–18 get the child codes (same ages as SL).
+            if (age != null && age >= 19) {
                 plan.push({ code: '90471', units: 1, reason: `${vaccineCount} vaccine(s) — first/only vaccine administered` });
                 if (vaccineCount > 1) {
                     plan.push({ code: '90472', units: vaccineCount - 1, reason: `${vaccineCount} vaccine(s) — each additional vaccine` });
@@ -2899,7 +2901,7 @@
         }
 
         // ---- Vaccine administration coding ----
-        // Works out 90460/90461 (under 18, component-based), 90471/90472
+        // Works out 90460/90461 (0–18, component-based), 90471/90472 (19+)
         // (18+, per-vaccine), and the Medicare-only overrides (G0008 flu,
         // G0009 pneumococcal, G0010 HepB, 90480 COVID — no age limit) from
         // whatever vaccine PRODUCT codes are already on the chart. Uses

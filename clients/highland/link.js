@@ -575,7 +575,7 @@
         const plans = cpts.map(c => ({
             ...c,
             picks: planCPT(c.code, icds),
-            sl: age !== null && age < 19 && SL_MODIFIER_CPTS.has(c.code)
+            sl: age !== null && age < 18 && SL_MODIFIER_CPTS.has(c.code)
         }));
 
         const modelPlans = USE_MODEL_WRITE ? plans.filter(p => p.model) : [];
@@ -640,7 +640,7 @@
         // For the panel's Modifiers table: which of these codes Link gives SL.
         PILOT.linkSLCodes = codes => {
             const age = getPatientAge();
-            if (age === null || age >= 19) return [];
+            if (age === null || age >= 18) return [];
             return (codes || []).filter(c => SL_MODIFIER_CPTS.has(String(c).trim()));
         };
     }

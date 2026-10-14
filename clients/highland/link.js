@@ -167,27 +167,70 @@
         }).filter(c => c.code);
     }
 
-    function getPatientAge() {
-        const span = document.querySelector('.patient-identifier-span');
-        if (!span) return null;
-        const dobMatch = span.textContent.match(/(\w+ \d{1,2},\s*\d{4})/);
-        if (!dobMatch) return null;
-        const dob = new Date(dobMatch[1]);
-        if (isNaN(dob)) return null;
-
-        let serviceDate = null;
-        const apptMatch = document.body.textContent.match(/Appt[:\s(]+(\d{2}\/\d{2}\/\d{4})/i);
-        if (apptMatch) {
-            const [mm, dd, yyyy] = apptMatch[1].split('/');
-            serviceDate = new Date(+yyyy, +mm - 1, +dd);
-        }
-        if (!serviceDate || isNaN(serviceDate)) serviceDate = new Date();
-
-        let age = serviceDate.getFullYear() - dob.getFullYear();
-        const md = serviceDate.getMonth() - dob.getMonth();
-        if (md < 0 || (md === 0 && serviceDate.getDate() < dob.getDate())) age--;
-        return age;
+    // ====================== AGE ON THE DAY OF THE VISIT ======================
+    // Age always = DOB vs. the date of the VISIT being coded — never today's
+    // date (a chart coded after the patient's birthday must still use the age
+    // they were on the visit day), and never the "(18 yo)" header text (that
+    // is the age TODAY). Unknown → null, so age rules are skipped, not guessed.
+    function ecwParseDate(v) {
+        const s = String(v == null ? '' : v).trim();
+        let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+        if (m) return new Date(+m[3], +m[1] - 1, +m[2]);
+        m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+        return null;
     }
+    function ecwScopeValue(key) {
+        let found;
+        for (const el of document.querySelectorAll('.ng-scope')) {
+            try {
+                for (let s = window.angular && angular.element(el).scope(); s; s = s.$parent) {
+                    if (s[key] != null) { found = s[key]; break; }
+                }
+            } catch (e) {}
+            if (found != null) break;
+        }
+        return found;
+    }
+    // Date of birth — Angular only: eCW's patient record, then the open
+    // visit's own copy (roomAndStatus.encounterObj.dob).
+    // If both copies exist they must agree — a mismatch means one is left
+    // over from the previous patient, so the age is treated as unknown.
+    function getPatientDOB() {
+        const p = ecwScopeValue('patientobj');
+        const enc = getOpenEncounterObj();
+        const d1 = p && ecwParseDate(p.DATE_OF_BIRTH);
+        const d2 = enc && ecwParseDate(enc.dob);
+        const ok1 = d1 && !isNaN(d1), ok2 = d2 && !isNaN(d2);
+        if (ok1 && ok2 && +d1 !== +d2) return null;
+        return ok1 ? d1 : (ok2 ? d2 : null);
+    }
+    // The open visit — Angular only: roomAndStatus.encounterObj, accepted
+    // only when its encounterId matches eCW's current encounterId.
+    function getOpenEncounterObj() {
+        const ras = ecwScopeValue('roomAndStatus');
+        const enc = ras && ras.encounterObj;
+        if (!enc || typeof enc !== 'object') return null;
+        const curId = ecwScopeValue('encounterId');
+        if (curId != null && String(curId) !== String(enc.encounterId)) return null;
+        return enc;
+    }
+    // Date of the visit being coded — Angular only (encDate / date of the
+    // open visit). Never "today", never page text.
+    function getVisitDateForAge() {
+        const enc = getOpenEncounterObj();
+        const d = enc && (ecwParseDate(enc.encDate) || ecwParseDate(enc.date));
+        return d && !isNaN(d) ? d : null;
+    }
+    function ageOnVisitDay() {
+        const dob = getPatientDOB(), visit = getVisitDateForAge();
+        if (!dob || !visit) return null;
+        let age = visit.getFullYear() - dob.getFullYear();
+        if (visit.getMonth() < dob.getMonth() || (visit.getMonth() === dob.getMonth() && visit.getDate() < dob.getDate())) age--;
+        return age >= 0 && age < 150 ? age : null;
+    }
+
+    function getPatientAge() { return ageOnVisitDay(); }
 
     // ═══ Reference data ═════════════════════════════════════════════════
     const PREVENTIVE_RULES = {

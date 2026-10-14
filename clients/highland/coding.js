@@ -265,6 +265,16 @@
         #smcPanel .smc-rm { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: var(--smc-ink-3); font-size: 15px; line-height: 1; cursor: pointer; opacity: .55; }
         #smcPanel .smc-row:hover .smc-rm, #smcPanel .smc-rm:focus-visible { opacity: 1; }
         #smcPanel .smc-rm:hover { background: var(--smc-del-soft); color: var(--smc-del); }
+        #smcPanel .smc-after [data-oc] { cursor: grab; }
+        #smcPanel .smc-after [data-oc].dragging { opacity: .45; }
+        #smcPanel .smc-after [data-oc].drop-before { box-shadow: inset 0 2px 0 var(--smc-ink-2); }
+        #smcPanel .smc-after [data-oc].drop-after { box-shadow: inset 0 -2px 0 var(--smc-ink-2); }
+        #smcPanel .smc-row.has-rm { padding-right: 70px; }
+        #smcPanel .smc-mv { position: absolute; top: 6px; right: 28px; display: inline-flex; gap: 1px; opacity: .55; }
+        #smcPanel .smc-row:hover .smc-mv { opacity: 1; }
+        #smcPanel .smc-mv button { width: 18px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: var(--smc-ink-3); font-size: 12px; line-height: 1; cursor: pointer; padding: 0; }
+        #smcPanel .smc-mv button:hover { background: var(--smc-line-2); color: var(--smc-ink); }
+        #smcPanel .smc-reset { margin-left: 8px; font-size: 11px; }
         #smcPanel .smc-manual { padding: 6px 10px; font-size: 11.5px; color: var(--smc-ink-3); border-top: 1px dashed var(--smc-line-2); }
         #smcPanel .smc-manual-code { display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; font-weight: 600; color: var(--smc-del); }
         #smcPanel .smc-undo { border: 0; background: transparent; color: var(--smc-ink-2); cursor: pointer; font-size: 13px; padding: 0 2px; }
@@ -4109,24 +4119,38 @@
 
     // Re-orders eCW's own Billing arrays (scope.icdData / scope.cptData) in
     // place so the grids — and what gets saved — follow the rules above.
-    async function reorderBillingCodes() {
+    async function reorderBillingCodes(manual) {
+        manual = manual || {};
         const scope = getBillingScope();
         if (!scope) return { ok: false, message: 'Billing screen not found — codes were not re-ordered' };
         let changed = false;
-        const reorder = (key, codeOf, rank) => {
+        const byList = (live, list) => {
+            const pos = c => { const i = list.indexOf(String(c).toUpperCase()); return i < 0 ? list.length : i; };
+            return live.map((o, i) => ({ o, i })).sort((a, b) => (pos(a.o.code) - pos(b.o.code)) || (a.i - b.i)).map(x => x.o);
+        };
+        const reorder = (key, codeOf, rank, list) => {
             const arr = scope[key];
             if (!Array.isArray(arr)) return;
             const live = arr.filter(Boolean).map(item => ({ code: codeOf(item), item }));
+            if (list) {
+                const sortedL = byList(live, list).map(o => o.item);
+                if (sortedL.every((x, i) => x === arr[i]) && live.length === arr.length) return;
+                ecwSafeApply(scope, () => { arr.splice(0, arr.length, ...sortedL); });
+                changed = true;
+                return;
+            }
             if (isOrdered(live, rank) && live.length === arr.length) return;
             const sorted = sortByRank(live, rank).map(o => o.item);
             ecwSafeApply(scope, () => { arr.splice(0, arr.length, ...sorted); });
             changed = true;
         };
-        reorder('icdData', x => String(x.medicalcode || ''), icdRank);
-        reorder('cptData', x => String(x.code || ''), cptRank);
+        reorder('icdData', x => String(x.medicalcode || ''), icdRank, manual.icd);
+        reorder('cptData', x => String(x.code || ''), cptRank, manual.cpt);
         if (!changed) return { ok: true, message: 'Already in order' };
         await ecwApiSleep(600);
-        const ok = isOrdered(readCurrentICD(), icdRank) && isOrdered(readCurrentCPT(), cptRank);
+        const inList = (rows, list) => { const codes = rows.map(r => r.code); const want = list.filter(c => codes.includes(c)); return codes.filter(c => want.includes(c)).every((c, i) => c === want[i]); };
+        const ok = (manual.icd ? inList(readCurrentICD(), manual.icd) : isOrdered(readCurrentICD(), icdRank)) &&
+                   (manual.cpt ? inList(readCurrentCPT(), manual.cpt) : isOrdered(readCurrentCPT(), cptRank));
         return ok ? { ok: true } : { ok: false, message: 'eCW did not show the new order — drag the rows into place manually' };
     }
 
@@ -4378,6 +4402,9 @@
     // removed from the claim on Add to EMR, and never proposed again while
     // the visit is open. Nothing is saved.  CODE -> { kind: 'icd' | 'cpt' }
     let manualDel = new Map();
+    // The coder's own order (drag / ↑ ↓), for this visit only: CODE lists.
+    // Applied on Add to EMR; Smart Sort keeps it instead of re-sorting.
+    let manualOrder = { icd: null, cpt: null };
     let lastAnalysisSig = '';
     let lastEncounterKey = '';
     let resultNotice = null;    // { ok, lines[] } shown after Add to EMR
@@ -4406,6 +4433,13 @@
     // Order a list of {code} items the way the chart will be ordered:
     // Smart Sort's lists when it's on, the basic ranks otherwise.
     function orderItems(list, kind) {
+        const base = autoOrderItems(list, kind);
+        const mo = manualOrder[kind];
+        if (!mo || !mo.length) return base;
+        const pos = code => { const i = mo.indexOf(code); return i < 0 ? mo.length : i; };
+        return base.map((x, i) => ({ x, i })).sort((a, b) => (pos(a.x.code) - pos(b.x.code)) || (a.i - b.i)).map(o => o.x);
+    }
+    function autoOrderItems(list, kind) {
         if (smartSortOn()) {
             const fn = kind === 'icd' ? PILOT.smartSort.orderICDCodes : PILOT.smartSort.orderCPTCodes;
             const order = fn(list.map(x => x.code));
@@ -4612,6 +4646,8 @@
         const total = dels.length + adds.length + 1;
         // The diagnosis the panel shows as PRIMARY. Smart Sort sets exactly this one
         // at the end, even if eCW moves the ★ by itself while codes are removed/added.
+        const manualIcdOrder = finalManualOrder('icd');
+        const manualCptOrder = finalManualOrder('cpt');
         let primaryTarget = null;
         try { primaryTarget = smartSortOn() ? (sp => predictedPrimary(readCurrentICD(), sp.icdAdds, sp.icdDels))(splitProposal(prop)) : null; } catch (e) {}
         let step = 0;
@@ -4688,12 +4724,12 @@
         let order, smart = null;
         if (smartSortOn()) {
             setBusyStatus('Smart Sort: ordering, primary diagnosis, modifiers…', 1);
-            try { smart = await PILOT.smartSort.run({ primary: primaryTarget && primaryTarget.code }); } catch (e) { console.error('ECW Pilot: Smart Sort failed', e); }
+            try { smart = await PILOT.smartSort.run({ primary: primaryTarget && primaryTarget.code, icdOrder: manualIcdOrder, cptOrder: manualCptOrder }); } catch (e) { console.error('ECW Pilot: Smart Sort failed', e); }
             await ecwApiSleep(600);
             order = smart && smart.ok ? { ok: true } : { ok: false, message: 'Smart Sort could not reach the Billing grids — codes were not re-ordered' };
         } else {
             setBusyStatus('Putting codes in order…', 1);
-            order = await reorderBillingCodes();
+            order = await reorderBillingCodes({ icd: manualIcdOrder, cpt: manualCptOrder });
         }
         reorderTriedSig = chartCodeSig();
 
@@ -4819,16 +4855,23 @@
         ], rank === icdRank ? 'icd' : 'cpt');
         if (!items.length) return `<div class="smc-empty">Nothing left</div>`;
         const pred = rank === icdRank ? predictedPrimary(current, adds, dels) : null;
+        // Smart Sort always puts the primary diagnosis on row 1 — show it there.
+        if (pred && smartSortOn() && manualOrder.icd) {
+            const pi = items.findIndex(x => x.code.toUpperCase() === pred.code);
+            if (pi > 0) items.unshift(items.splice(pi, 1)[0]);
+        }
         const pTagFor = code => (pred && pred.code === code ? primaryTag(pred.will, pred.why) : '');
         const rmKind = rank === icdRank ? 'icd' : 'cpt';
-        const rmBtn = code => `<button type="button" class="smc-rm" data-act="manual-del" data-code="${escapeHtml(code)}" data-kind="${rmKind}" title="Remove ${escapeHtml(code)} (applied on Add to EMR)" aria-label="Remove ${escapeHtml(code)}">×</button>`;
+        const mvBtns = code => `<span class="smc-mv"><button type="button" data-act="manual-up" data-code="${escapeHtml(code)}" data-kind="${rmKind}" title="Move up" aria-label="Move ${escapeHtml(code)} up">↑</button><button type="button" data-act="manual-down" data-code="${escapeHtml(code)}" data-kind="${rmKind}" title="Move down" aria-label="Move ${escapeHtml(code)} down">↓</button></span>`;
+        const rmBtn = code => `${mvBtns(code)}<button type="button" class="smc-rm" data-act="manual-del" data-code="${escapeHtml(code)}" data-kind="${rmKind}" title="Remove ${escapeHtml(code)} (applied on Add to EMR)" aria-label="Remove ${escapeHtml(code)}">×</button>`;
+        const dragAttr = code => `draggable="true" data-oc="${escapeHtml(code)}" data-ok="${rmKind}"`;
         const pCls = code => (pred && pred.code === code ? 'primary' : '');
         let n = 0;
         return items.map(x => {
             if (x.t === 'kept') {
                 n++;
                 const units = x.units && x.units !== 1 ? `<span class="smc-tag">× ${x.units}</span>` : '';
-                return `<div class="smc-row has-rm ${pCls(x.code)}"><span class="mk"><span class="smc-num">${n}</span></span>
+                return `<div class="smc-row has-rm ${pCls(x.code)}" ${dragAttr(x.code)}><span class="mk"><span class="smc-num">${n}</span></span>
                     <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${units}${pTagFor(x.code)}</div><div class="smc-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</div></div>${rmBtn(x.code)}</div>`;
             }
             const on = isPicked('a', x);
@@ -4845,7 +4888,7 @@
             const nameLine = billingName
                 ? `<div class="smc-name" title="${escapeHtml(billingName)}">${escapeHtml(billingName)}</div>`
                 : '';
-            return `<label class="smc-row add has-rm ${on ? '' : 'off'} ${x.needsReview ? 'review' : ''} ${pCls(code)}" title="${escapeHtml(billingName ? billingName + ' — ' + x.reason : x.reason)}">
+            return `<label class="smc-row add has-rm ${on ? '' : 'off'} ${x.needsReview ? 'review' : ''} ${pCls(code)}" ${dragAttr(code)} title="${escapeHtml(billingName ? billingName + ' — ' + x.reason : x.reason)}">
                 <span class="mk"><input type="checkbox" data-k="${escapeHtml(keyOf('a', x.code))}" ${on ? 'checked' : ''} aria-label="Add ${escapeHtml(x.code)}"></span>
                 <div><div class="smc-code"><b>${escapeHtml(x.code)}</b>${tags}${pTagFor(code)}</div>${nameLine}
                 <div class="smc-why">${escapeHtml(x.reason)}</div></div>${rmBtn(code)}</label>`;
@@ -4874,9 +4917,35 @@
             <div class="smc-block-head"><h2>${title}</h2><span class="smc-sum">${sumHtml(adds, dels, orderFix)}</span></div>
             <div class="smc-diff">
                 <div class="smc-col"><div class="smc-col-h">Current <span>${current.length}</span></div>${currentColumnHtml(current, dels, rank === icdRank)}</div>
-                <div class="smc-col"><div class="smc-col-h">After changes <span>${afterCount(current, adds, dels)}</span></div>${afterColumnHtml(current, adds, dels, rank)}</div>
+                <div class="smc-col smc-after"><div class="smc-col-h">After changes <span>${afterCount(current, adds, dels)}</span>${manualOrder[rank === icdRank ? 'icd' : 'cpt'] ? `<button type="button" class="smc-link smc-reset" data-act="manual-order-reset" data-kind="${rank === icdRank ? 'icd' : 'cpt'}" title="Go back to ECW Pilot's order">Reset order</button>` : ''}</div>${afterColumnHtml(current, adds, dels, rank)}</div>
             </div>${manualRemovedHtml(rank === icdRank ? 'icd' : 'cpt')}${extra || ''}
         </div>`;
+    }
+
+    // Codes in the order the After column shows them right now (one kind).
+    function shownOrder(kind, fromEl) {
+        const col = (fromEl && fromEl.closest('.smc-after')) || panel;
+        return [...col.querySelectorAll(`[data-oc][data-ok="${kind}"]`)].map(n => n.dataset.oc.toUpperCase());
+    }
+    function setManualOrder(kind, list) {
+        manualOrder[kind] = list && list.length ? list : null;
+        reorderTriedSig = ''; smartTriedSig = '';
+        renderPanel(true);
+    }
+    // Final code order (one kind) as the panel shows it — only when the coder
+    // arranged it by hand; otherwise null (ECW Pilot / Smart Sort decide).
+    function finalManualOrder(kind) {
+        if (!manualOrder[kind]) return null;
+        const sp = splitProposal(buildProposal());
+        const current = kind === 'icd' ? readCurrentICD() : readCurrentCPT();
+        const adds = kind === 'icd' ? sp.icdAdds : sp.cptAdds;
+        const dels = kind === 'icd' ? sp.icdDels : sp.cptDels;
+        const delSet = new Set(dels.filter(d => isPicked('d', d)).map(d => d.code.toUpperCase()));
+        const list = orderItems([
+            ...current.filter(x => !delSet.has(x.code)),
+            ...adds.filter(a => isPicked('a', a) && !current.some(x => x.code === a.code.toUpperCase())).map(a => ({ code: a.code.toUpperCase() }))
+        ], kind);
+        return list.map(x => x.code.toUpperCase());
     }
 
     function manualRemovedHtml(kind) {
@@ -5350,7 +5419,7 @@
         const encKey = getEncounterKey();
         if (encKey !== lastEncounterKey) {
             lastEncounterKey = encKey;
-            pick = {}; manualDel = new Map(); activeQuick = null; activePlan = null;
+            pick = {}; manualDel = new Map(); manualOrder = { icd: null, cpt: null }; activeQuick = null; activePlan = null;
             analysisState = null; lastAnalysisSig = ''; resultNotice = null; reviewState = null; reorderTriedSig = ''; smartTriedSig = '';
         }
     }
@@ -5506,6 +5575,18 @@
                     if (code) { manualDel.set(code, { kind: act.dataset.kind === 'icd' ? 'icd' : 'cpt' }); pick[keyOf('d', code)] = true; }
                     renderPanel(true);
                 }
+                else if (act.dataset.act === 'manual-up' || act.dataset.act === 'manual-down') {
+                    e.preventDefault();
+                    const kind = act.dataset.kind === 'icd' ? 'icd' : 'cpt';
+                    const list = shownOrder(kind, act);
+                    const i = list.indexOf(String(act.dataset.code || '').toUpperCase());
+                    const j = act.dataset.act === 'manual-up' ? i - 1 : i + 1;
+                    if (i >= 0 && j >= 0 && j < list.length) { [list[i], list[j]] = [list[j], list[i]]; setManualOrder(kind, list); }
+                }
+                else if (act.dataset.act === 'manual-order-reset') {
+                    e.preventDefault();
+                    setManualOrder(act.dataset.kind === 'icd' ? 'icd' : 'cpt', null);
+                }
                 else if (act.dataset.act === 'manual-undo') {
                     e.preventDefault();
                     const code = String(act.dataset.code || '').toUpperCase();
@@ -5523,6 +5604,35 @@
             }
             if (t.closest('#smcApply')) addToEMR();
         });
+        let dragCode = null, dragKind = null;
+        const clearDropMarks = () => panel.querySelectorAll('.drop-before, .drop-after, .dragging').forEach(n => n.classList.remove('drop-before', 'drop-after', 'dragging'));
+        panel.addEventListener('dragstart', e => {
+            const row = e.target.closest && e.target.closest('[data-oc]');
+            if (!row) return;
+            dragCode = row.dataset.oc.toUpperCase(); dragKind = row.dataset.ok;
+            row.classList.add('dragging');
+            try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragCode); } catch (err) {}
+        });
+        panel.addEventListener('dragover', e => {
+            const row = e.target.closest && e.target.closest('[data-oc]');
+            if (!dragCode || !row || row.dataset.ok !== dragKind) return;
+            e.preventDefault();
+            const r = row.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2;
+            panel.querySelectorAll('.drop-before, .drop-after').forEach(n => { if (n !== row) n.classList.remove('drop-before', 'drop-after'); });
+            row.classList.toggle('drop-after', after); row.classList.toggle('drop-before', !after);
+        });
+        panel.addEventListener('drop', e => {
+            const row = e.target.closest && e.target.closest('[data-oc]');
+            if (!dragCode || !row || row.dataset.ok !== dragKind) { clearDropMarks(); return; }
+            e.preventDefault();
+            const target = row.dataset.oc.toUpperCase();
+            const after = row.classList.contains('drop-after');
+            const list = shownOrder(dragKind, row).filter(c => c !== dragCode);
+            const at = list.indexOf(target);
+            if (at >= 0) { list.splice(after ? at + 1 : at, 0, dragCode); setManualOrder(dragKind, list); }
+            dragCode = dragKind = null; clearDropMarks();
+        });
+        panel.addEventListener('dragend', () => { dragCode = dragKind = null; clearDropMarks(); });
         panel.addEventListener('change', e => {
             const t = e.target;
             if (t.dataset && t.dataset.setting) { onModuleToggle(t.dataset.setting, t.checked).then(() => { lastAnalysisSig = ''; renderPanel(true); }); return; }

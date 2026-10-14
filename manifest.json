@@ -33,8 +33,12 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.23",
+          "version": "1.29",
           "notes": [
+            "Manual remove: × on any code in 'After changes' removes it on Add to EMR and stops ECW Pilot proposing it again for this visit; ↺ puts it back",
+            "Chief complaint is read from eCW's data for the OPEN visit (getEncounterDetails) — never from page text",
+            "Vitals (BP, BMI, BMI %) are read from eCW's Vitals data for the OPEN visit only — never from page text; while they load, no changes are proposed",
+            "Age = age on the VISIT day, read only from eCW's Angular data (patient DOB + the open visit's date) — never page text or today's date; if it can't be read, no changes are proposed (DOB is cross-checked between the patient record and the visit record)",
             "UHC: no G-codes on the claim — ECW Pilot doesn't add them and removes any already on the chart (except G0101 / G0102 / G0103)",
             "G0444 / G0442 on any visit (not only preventive), once per insurance per calendar year, not for Medicare / Medicaid / UHC",
             "Depression: G0444 (3725F when G0444 can't be billed) + G8510 / G8431 (UHC: 3725F alone)",
@@ -44,9 +48,9 @@
         "link": {
           "label": "Link",
           "path": "clients/highland/link.js",
-          "version": "1.5",
+          "version": "1.8",
           "notes": [
-            "Auto mode: the Link button is now a soft green \"Linked ✓\" (click to link again)"
+            "Age on the VISIT day from eCW's Angular data only; DOB cross-checked between patient and visit records"
           ]
         }
       },

@@ -262,18 +262,17 @@
         #smcPanel .smc-row.del input { accent-color: var(--smc-del); }
         #smcPanel .smc-row.del.off { background: transparent; }
         #smcPanel .smc-row.has-rm { position: relative; padding-right: 28px; }
-        #smcPanel .smc-rm { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: var(--smc-ink-3); font-size: 15px; line-height: 1; cursor: pointer; opacity: .55; }
-        #smcPanel .smc-row:hover .smc-rm, #smcPanel .smc-rm:focus-visible { opacity: 1; }
-        #smcPanel .smc-rm:hover { background: var(--smc-del-soft); color: var(--smc-del); }
+        #smcPanel .smc-rm { position: absolute; }
         #smcPanel .smc-after [data-oc] { cursor: grab; }
-        #smcPanel .smc-after [data-oc].dragging { opacity: .45; }
-        #smcPanel .smc-after [data-oc].drop-before { box-shadow: inset 0 2px 0 var(--smc-ink-2); }
-        #smcPanel .smc-after [data-oc].drop-after { box-shadow: inset 0 -2px 0 var(--smc-ink-2); }
-        #smcPanel .smc-row.has-rm { padding-right: 70px; }
-        #smcPanel .smc-mv { position: absolute; top: 6px; right: 28px; display: inline-flex; gap: 1px; opacity: .55; }
-        #smcPanel .smc-row:hover .smc-mv { opacity: 1; }
-        #smcPanel .smc-mv button { width: 18px; height: 20px; border: 0; border-radius: 4px; background: transparent; color: var(--smc-ink-3); font-size: 12px; line-height: 1; cursor: pointer; padding: 0; }
-        #smcPanel .smc-mv button:hover { background: var(--smc-line-2); color: var(--smc-ink); }
+        #smcPanel .smc-after [data-oc].gap { background: transparent; outline: 1.5px dashed var(--smc-ink-3); outline-offset: -3px; }
+        #smcPanel .smc-after [data-oc].gap > * { visibility: hidden; }
+        #smcPanel .smc-after [data-oc].landed { background: #e3eefb; transition: background .6s; }
+        #smcPanel .smc-row.has-rm { padding-right: 86px; }
+        #smcPanel .smc-mv { position: absolute; top: 7px; right: 32px; display: inline-flex; gap: 3px; }
+        #smcPanel .smc-mv button, #smcPanel .smc-rm { width: 22px; height: 22px; padding: 0; border: 1px solid var(--smc-line); border-radius: 5px; background: #fff; color: var(--smc-ink-2); font-size: 13px; line-height: 1; cursor: pointer; opacity: 1; }
+        #smcPanel .smc-mv button:hover { background: var(--smc-line-2); color: var(--smc-ink); border-color: var(--smc-ink-3); }
+        #smcPanel .smc-rm { top: 7px; right: 6px; font-size: 15px; }
+        #smcPanel .smc-rm:hover { background: var(--smc-del-soft); color: var(--smc-del); border-color: var(--smc-del); }
         #smcPanel .smc-reset { margin-left: 8px; font-size: 11px; }
         #smcPanel .smc-manual { padding: 6px 10px; font-size: 11.5px; color: var(--smc-ink-3); border-top: 1px dashed var(--smc-line-2); }
         #smcPanel .smc-manual-code { display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; font-weight: 600; color: var(--smc-del); }
@@ -4927,10 +4926,39 @@
         const col = (fromEl && fromEl.closest('.smc-after')) || panel;
         return [...col.querySelectorAll(`[data-oc][data-ok="${kind}"]`)].map(n => n.dataset.oc.toUpperCase());
     }
-    function setManualOrder(kind, list) {
+    function setManualOrder(kind, list, movedCode, alreadyInPlace) {
+        const before = alreadyInPlace ? null : rowTops(kind);
         manualOrder[kind] = list && list.length ? list : null;
         reorderTriedSig = ''; smartTriedSig = '';
         renderPanel(true);
+        if (before) slideFrom(before, kind);
+        if (movedCode) {
+            const row = panel.querySelector(`.smc-after [data-oc="${CSS.escape(movedCode)}"][data-ok="${kind}"]`);
+            if (row) { row.classList.add('landed'); setTimeout(() => row.classList.remove('landed'), 800); }
+        }
+    }
+    // Row positions in the After column, keyed by code (one kind).
+    function rowTops(kind) {
+        const m = new Map();
+        panel.querySelectorAll(`.smc-after [data-oc][data-ok="${kind}"]`).forEach(n => m.set(n.dataset.oc, n.getBoundingClientRect().top));
+        return m;
+    }
+    // Slide rows from where they were to where they are now.
+    // `before`: Map(element -> top) or, with `kind`, Map(code -> top).
+    function slideFrom(before, kind) {
+        if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        const rows = kind ? [...panel.querySelectorAll(`.smc-after [data-oc][data-ok="${kind}"]`)] : [...before.keys()];
+        rows.forEach(n => {
+            const was = kind ? before.get(n.dataset.oc) : before.get(n);
+            if (was == null) return;
+            const dy = was - n.getBoundingClientRect().top;
+            if (!dy) return;
+            n.style.transition = 'none';
+            n.style.transform = `translateY(${dy}px)`;
+            n.getBoundingClientRect();
+            n.style.transition = 'transform .2s ease';
+            n.style.transform = '';
+        });
     }
     // Final code order (one kind) as the panel shows it — only when the coder
     // arranged it by hand; otherwise null (ECW Pilot / Smart Sort decide).
@@ -5581,7 +5609,7 @@
                     const list = shownOrder(kind, act);
                     const i = list.indexOf(String(act.dataset.code || '').toUpperCase());
                     const j = act.dataset.act === 'manual-up' ? i - 1 : i + 1;
-                    if (i >= 0 && j >= 0 && j < list.length) { [list[i], list[j]] = [list[j], list[i]]; setManualOrder(kind, list); }
+                    if (i >= 0 && j >= 0 && j < list.length) { const moved = list[i]; [list[i], list[j]] = [list[j], list[i]]; setManualOrder(kind, list, moved); }
                 }
                 else if (act.dataset.act === 'manual-order-reset') {
                     e.preventDefault();
@@ -5604,35 +5632,41 @@
             }
             if (t.closest('#smcApply')) addToEMR();
         });
-        let dragCode = null, dragKind = null;
-        const clearDropMarks = () => panel.querySelectorAll('.drop-before, .drop-after, .dragging').forEach(n => n.classList.remove('drop-before', 'drop-after', 'dragging'));
+        // Drag to reorder (After changes column): the dragged row becomes a
+        // dashed gap and the other rows slide aside as the mouse moves.
+        // Staged — the order is only applied on Add to EMR.
+        let dragRow = null, dragKind = null;
         panel.addEventListener('dragstart', e => {
             const row = e.target.closest && e.target.closest('[data-oc]');
             if (!row) return;
-            dragCode = row.dataset.oc.toUpperCase(); dragKind = row.dataset.ok;
-            row.classList.add('dragging');
-            try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragCode); } catch (err) {}
+            dragRow = row; dragKind = row.dataset.ok; dragActive = true;
+            try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', row.dataset.oc); } catch (err) {}
+            setTimeout(() => { if (dragRow) dragRow.classList.add('gap'); }, 0);
         });
         panel.addEventListener('dragover', e => {
+            if (!dragRow) return;
             const row = e.target.closest && e.target.closest('[data-oc]');
-            if (!dragCode || !row || row.dataset.ok !== dragKind) return;
+            if (!row || row.dataset.ok !== dragKind || row.parentNode !== dragRow.parentNode) return;
             e.preventDefault();
+            if (row === dragRow) return;
             const r = row.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2;
-            panel.querySelectorAll('.drop-before, .drop-after').forEach(n => { if (n !== row) n.classList.remove('drop-before', 'drop-after'); });
-            row.classList.toggle('drop-after', after); row.classList.toggle('drop-before', !after);
+            const ref = after ? row.nextSibling : row;
+            if (ref === dragRow || ref === dragRow.nextSibling) return;
+            const parent = row.parentNode;
+            const rows = [...parent.querySelectorAll(':scope > [data-oc]')];
+            const before = new Map(rows.map(n => [n, n.getBoundingClientRect().top]));
+            parent.insertBefore(dragRow, ref);
+            slideFrom(before);
         });
-        panel.addEventListener('drop', e => {
-            const row = e.target.closest && e.target.closest('[data-oc]');
-            if (!dragCode || !row || row.dataset.ok !== dragKind) { clearDropMarks(); return; }
-            e.preventDefault();
-            const target = row.dataset.oc.toUpperCase();
-            const after = row.classList.contains('drop-after');
-            const list = shownOrder(dragKind, row).filter(c => c !== dragCode);
-            const at = list.indexOf(target);
-            if (at >= 0) { list.splice(after ? at + 1 : at, 0, dragCode); setManualOrder(dragKind, list); }
-            dragCode = dragKind = null; clearDropMarks();
-        });
-        panel.addEventListener('dragend', () => { dragCode = dragKind = null; clearDropMarks(); });
+        const finishDrag = () => {
+            if (!dragRow) return;
+            const row = dragRow, kind = dragKind;
+            dragRow = dragKind = null; dragActive = false;
+            row.classList.remove('gap');
+            setManualOrder(kind, shownOrder(kind, row), row.dataset.oc.toUpperCase(), true);
+        };
+        panel.addEventListener('drop', e => { if (dragRow) { e.preventDefault(); finishDrag(); } });
+        panel.addEventListener('dragend', finishDrag);
         panel.addEventListener('change', e => {
             const t = e.target;
             if (t.dataset && t.dataset.setting) { onModuleToggle(t.dataset.setting, t.checked).then(() => { lastAnalysisSig = ''; renderPanel(true); }); return; }
@@ -5746,8 +5780,10 @@
         renderPanel(true);
     }
 
+    let dragActive = false;
     function renderPanel(force) {
         if (!panel || !isPanelOpen()) return;
+        if (dragActive) return;   // a redraw would cancel the drag
         if (force) Object.keys(renderCache).forEach(k => delete renderCache[k]);
 
         syncEncounterState();

@@ -320,9 +320,12 @@ var CPT_ORDER = [
       setMod("99211", "25");
     }
 
-    // ECW Pilot: keep the SL modifier Link puts on vaccines for patients under 19.
+    // ECW Pilot: keep the SL modifier Link puts on vaccines for patients
+    // under 18 — but only where Link says it belongs (an SL on an 18+
+    // patient's claim is removed). Without Link, any existing SL is kept.
+    var slCodes = PILOT && typeof PILOT.linkSLCodes === "function" ? new Set(PILOT.linkSLCodes(presentCPTs) || []) : null;
     plan.forEach(function (val, code) {
-      if (val === "" && String(byCode.get(code).mod1 || "").trim().toUpperCase() === "SL") plan.set(code, "SL");
+      if (val === "" && String(byCode.get(code).mod1 || "").trim().toUpperCase() === "SL" && (!slCodes || slCodes.has(code))) plan.set(code, "SL");
     });
     return plan;
   }

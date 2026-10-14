@@ -42,6 +42,15 @@
     Array.prototype.push.apply(arr, newOrder);
   }
 
+  // The coder's own order (codes, from the coding panel). Codes not in the
+  // list keep their current relative order and go after the listed ones.
+  function orderByList(items, getCode, list) {
+    var pos = function (r) { var i = list.indexOf(String(getCode(r) || "").trim().toUpperCase()); return i < 0 ? list.length : i; };
+    return items.map(function (x, i) { return { x: x, i: i }; })
+      .sort(function (a, b) { return (pos(a.x) - pos(b.x)) || (a.i - b.i); })
+      .map(function (o) { return o.x; });
+  }
+
   // Same semantics as the old one-at-a-time moves: first match goes to the bottom.
   function moveToBottom(arr, getCode, code) {
     var i = arr.findIndex(function (x) { return getCode(x) === code; });
@@ -108,14 +117,22 @@ var ICD_HEAD = [
     return out;
   }
 
-  function sortICD() {
+  function sortICD(manualOrder) {
     var s = findListScope("#billingTbl2", "icdData");
     if (!s) return false;
     var getCode = function (r) { return (r && r.medicalcode || "").trim(); };
     // Row 1 = the diagnosis the ★ shows right now (live), not the saved flag.
     var live = currentPrimary(s);
     var getPrimary = function (r) { return !!live && getCode(r).toUpperCase() === String(live).toUpperCase(); };
-    var sorted = orderICDItems(s.icdData, getCode, getPrimary);
+    var sorted;
+    if (manualOrder && manualOrder.length) {
+      // Coder's order, primary still on row 1.
+      sorted = orderByList(s.icdData, getCode, manualOrder);
+      var pi = sorted.findIndex(getPrimary);
+      if (pi > 0) sorted.unshift(sorted.splice(pi, 1)[0]);
+    } else {
+      sorted = orderICDItems(s.icdData, getCode, getPrimary);
+    }
     applyScope(s, function () { replaceInPlace(s.icdData, sorted); });
 
     // Same safety net as before, in case the row-number cell isn't bound to $index.
@@ -236,11 +253,11 @@ var CPT_ORDER = [
     return arr;
   }
 
-  function sortCPT() {
+  function sortCPT(manualOrder) {
     var s = findListScope("#billingTbl4", "cptData");
     if (!s) return false;
     var getCode = function (r) { return (r && r.code || "").trim(); };
-    var sorted = orderCPTItems(s.cptData, getCode);
+    var sorted = manualOrder && manualOrder.length ? orderByList(s.cptData, getCode, manualOrder) : orderCPTItems(s.cptData, getCode);
     applyScope(s, function () { replaceInPlace(s.cptData, sorted); });
     var tb = document.querySelector("#billingTbl4 tbody");
     if (tb) tb.dispatchEvent(new Event("mouseup"));
@@ -578,8 +595,8 @@ var CPT_ORDER = [
     // Primary first: sortICD() floats whichever row is marked primary to the
     // top, so it has to be set before the list is ordered.
     var primary = await setPrimaryIfMissing(opts.primary);
-    var icd = sortICD();
-    var cpt = sortCPT();
+    var icd = sortICD(opts.icdOrder);
+    var cpt = sortCPT(opts.cptOrder);
     var mods = applyModifiers();
     var ms = Math.round(performance.now() - t0);
     console.log("[Smart Sort] done in " + ms + " ms", { primary: primary, modifiersChanged: mods });

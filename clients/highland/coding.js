@@ -294,6 +294,7 @@
         #smcSchedSide .ss-main { display: flex; flex-direction: column; min-width: 0; }
         #smcSchedSide .ss-n { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         #smcSchedSide .ss-m { color: #7f8d91; font-size: 11.5px; }
+        #smcSchedSide .ss-st { color: #4a5b60; font-weight: 600; }
         #smcPanel .smc-sched { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 6px 8px; border-radius: 8px; background: #e8f1fb; color: #1d4f8a; }
         #smcPanel .smc-sched .smc-icon-btn { font-size: 18px; line-height: 1; }
         #smcPanel .smc-sched-mid { flex: 1; display: flex; flex-direction: column; align-items: center; font-size: 11.5px; text-align: center; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 4px; border-radius: 6px; font-family: inherit; }
@@ -924,8 +925,12 @@
         const n = pendingChangeCount() + (manualOrder.icd || manualOrder.cpt ? 1 : 0);
         schedStatus.set(schedVisit.encounterId, schedVisit.locked ? 'locked' : n ? 'changes' : 'clean');
     }
+    let schedDecoSig = '';
     function schedDecorateRows() {
         if (!schedStatus.size) return;
+        const sig = [...schedStatus].join(';') + '|' + document.querySelectorAll('tr[ng-repeat]').length + '|' + document.querySelectorAll('.smc-sched-dot').length;
+        if (sig === schedDecoSig) return;
+        schedDecoSig = sig;
         const ng = pageGlobal('angular');
         if (!ng || !ng.element) return;
         document.querySelectorAll('tr[ng-repeat]').forEach(tr => {
@@ -960,13 +965,15 @@
             <button type="button" class="smc-icon-btn" data-act="sched-prev" aria-label="Previous patient">‹</button>
             <button type="button" class="smc-sched-mid" data-act="sched-list" aria-expanded="${schedListOpen}" title="${schedListOpen ? 'Hide' : 'Show'} the patient list">
               <span class="smc-sched-tag">From the schedule — chart not opened</span>
-              <span>Visit ${i + 1} of ${list.length} · ${escapeHtml(String(schedVisit.meta.viewApptTime || schedVisit.meta.time || ''))}${schedVisit.locked ? ' · locked' : ''}${st} · ${schedListOpen ? 'hide list' : 'show list'}</span></button>
+              <span>Visit ${i + 1} of ${list.length} · ${escapeHtml(String(schedVisit.meta.viewApptTime || schedVisit.meta.time || ''))}${schedStatusText(schedVisit.meta) ? ' · ' + escapeHtml(schedStatusText(schedVisit.meta)) : ''}${schedVisit.locked ? ' · locked' : ''}${st} · ${schedListOpen ? 'hide list' : 'show list'}</span></button>
             <button type="button" class="smc-icon-btn" data-act="sched-next" aria-label="Next patient">›</button>
         </div>`;
     }
 
     // ---- Patient list docked beside the panel (schedule mode) ----
     let schedSide = null;
+    // eCW's visit status, as the schedule shows it (e.g. CHK, PEN, ARR).
+    function schedStatusText(v) { return String(v.status || v.viewStatusAftArr || '').replace(/^-$/, '').trim(); }
     function schedSideRowsHtml() {
         const list = scheduleList() || [];
         return list.map(v => {
@@ -975,7 +982,7 @@
             const tip = s === 'changes' ? 'Changes proposed' : s === 'clean' ? 'Nothing to change' : s === 'locked' ? 'Locked' : 'Not looked at yet';
             return `<button type="button" class="ss-row${on ? ' on' : ''}" role="option" aria-selected="${on}" data-enc="${escapeHtml(id)}">
                 <span class="ss-dot" style="background:${s ? SCHED_DOT[s] : 'transparent'};border-color:${s ? SCHED_DOT[s] : '#c9d3d1'}" title="${tip}" aria-label="${tip}"></span>
-                <span class="ss-main"><span class="ss-n">${escapeHtml(String(v.name || ''))}</span><span class="ss-m">${escapeHtml(String(v.viewApptTime || v.time || ''))} · ${escapeHtml(String(v.visitType || ''))}${String(v.encLock) === '1' ? ' · locked' : ''}</span></span>
+                <span class="ss-main"><span class="ss-n">${escapeHtml(String(v.name || ''))}</span><span class="ss-m">${escapeHtml(String(v.viewApptTime || v.time || ''))} · ${escapeHtml(String(v.visitType || ''))}${schedStatusText(v) ? ` · <span class="ss-st">${escapeHtml(schedStatusText(v))}</span>` : ''}${String(v.encLock) === '1' ? ' · locked' : ''}</span></span>
             </button>`;
         }).join('');
     }
@@ -1334,7 +1341,7 @@
         const api = window.__ecwPatientHistory;
         const data = api && api.getData ? api.getData() : null;
         if (!data || !data.length) return "";
-        const currentDosStr = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+        const currentDosStr = getCurrentDOSStr();
         if (!currentDosStr) return "";
         const match = data.find(enc => enc.encounter_date === currentDosStr);
         return (match && match.insurance_name) ? match.insurance_name : "";
@@ -1823,7 +1830,7 @@
         const data = api && api.getData ? api.getData() : null;
         if (!data || !data.length) return false;
         const upperCode = code.toUpperCase();
-        const currentDosStr = document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
+        const currentDosStr = getCurrentDOSStr();
         const currentTs = currentDosStr ? parseUSDateSnap(currentDosStr) : null;
         if (!currentTs) return false;
         return data.some(enc => {
@@ -5186,6 +5193,7 @@
             readCurrentCPT().map(x => `${x.code}x${x.units}`).join(','),
             isWeekendEnabled() ? 'W' : '',
             api && api.isLoading && api.isLoading() ? 'L' : (api && api.getEncounterCount ? api.getEncounterCount() : 0),
+            api && api.getRevision ? api.getRevision() : '',   // History 2: background insurance arrived
             (cachedEncounterText || '').length,
             // re-run once the visit's vitals / chief complaint (and, on the
             // schedule, the visit itself) have finished loading

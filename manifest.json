@@ -33,9 +33,10 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.36",
+          "version": "1.37",
           "notes": [
             "Schedule mode: Add to EMR from the schedule — added/removed codes (incl. CPT removals and office-visit swaps), order, primary, modifiers (Smart Sort) and pointers (Link) in one save, then read back and checked",
+            "Schedule mode: patient list inside the panel — click 'Visit 1 of N ▾' to see the day's patients (time, name, type, dot) and pick one",
             "Dots on the schedule rows for visits you've looked at (amber = changes, green = none, grey = locked)",
             "Schedule mode (view only): on eCW's schedule, ECW Pilot's panel shows the visit you pick (click its row or use ‹ ›) with the same proposals as in the chart — chart not opened, nothing saved",
             "Fix: proposals refresh once the visit's vitals and chief complaint have loaded"

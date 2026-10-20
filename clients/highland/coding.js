@@ -276,6 +276,10 @@
         #smcPanel .smc-rm { top: 7px; right: 6px; font-size: 15px; }
         #smcPanel .smc-rm:hover { background: var(--smc-del-soft); color: var(--smc-del); border-color: var(--smc-del); }
         #smcPanel .smc-reset { margin-left: 8px; font-size: 11px; }
+        #smcPanel .smc-sched { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 6px 8px; border-radius: 8px; background: #e8f1fb; color: #1d4f8a; }
+        #smcPanel .smc-sched .smc-icon-btn { font-size: 18px; line-height: 1; }
+        #smcPanel .smc-sched-mid { flex: 1; display: flex; flex-direction: column; align-items: center; font-size: 11.5px; text-align: center; }
+        #smcPanel .smc-sched-tag { font-weight: 600; }
         #smcPanel .smc-manual { padding: 6px 10px; font-size: 11.5px; color: var(--smc-ink-3); border-top: 1px dashed var(--smc-line-2); }
         #smcPanel .smc-manual-code { display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; font-weight: 600; color: var(--smc-del); }
         #smcPanel .smc-undo { border: 0; background: transparent; color: var(--smc-ink-2); cursor: pointer; font-size: 13px; padding: 0 2px; }
@@ -548,6 +552,7 @@
     // If both copies exist they must agree — a mismatch means one is left
     // over from the previous patient, so the age is treated as unknown.
     function getPatientDOB() {
+        if (schedMode()) { const d = ecwParseDate(schedVisit.dob); return d && !isNaN(d) ? d : null; }
         const p = ecwScopeValue('patientobj');
         const enc = getOpenEncounterObj();
         const d1 = p && ecwParseDate(p.DATE_OF_BIRTH);
@@ -559,6 +564,7 @@
     // The open visit — Angular only: roomAndStatus.encounterObj, accepted
     // only when its encounterId matches eCW's current encounterId.
     function getOpenEncounterObj() {
+        if (schedMode()) return { encounterId: schedVisit.encounterId, patientId: schedVisit.patientId, dob: schedVisit.dob, encDate: schedVisit.encDate, date: schedVisit.encDate };
         const ras = ecwScopeValue('roomAndStatus');
         const enc = ras && ras.encounterObj;
         if (!enc || typeof enc !== 'object') return null;
@@ -720,6 +726,467 @@
         return { state: e.state, text: e.text || '' };
     }
 
+    // ====================== SCHEDULE MODE (view only) ======================
+    // On eCW's schedule (no chart open), ECW Pilot's usual panel shows a visit
+    // picked on the schedule. The visit's data comes from eCW's server by
+    // visit ID — the same sources eCW's own Billing screen and History use —
+    // and the low-level readers below (grid rows, note text, age, insurance…)
+    // read it instead of the screen, so every rule above them is unchanged.
+    // Saving from the schedule is not switched on yet.
+    let schedVisit = null;        // { meta, encounterId, patientId, name, dob, sex, encDate, state, icd, cpt, primary, noteText, insurance, error }
+    let schedLoadToken = 0;
+    function chartIsOpen() { return !!document.getElementById('encDropDownItem'); }
+    let schedListCache = { at: 0, list: null };
+    function scheduleList() {
+        if (chartIsOpen()) return null;
+        if (Date.now() - schedListCache.at > 1500) {
+            const l = ecwScopeValue('officeVisitList');
+            schedListCache = { at: Date.now(), list: Array.isArray(l) && l.length ? l : null };
+        }
+        return schedListCache.list;
+    }
+    function onSchedulePage() { return !!scheduleList(); }
+    function schedMode() { return !!schedVisit && !chartIsOpen(); }
+    function schedReady() { return schedMode() && schedVisit.state === 'ready'; }
+    function schedUrl(p) { const mk = pageGlobal('makeURL'); return typeof mk === 'function' ? mk(p) : p; }
+    async function schedGet(p) {
+        const r = await fetch(schedUrl(p), { credentials: 'include' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+    }
+    function schedLeaf(el) { const o = {}; for (const c of el.children) o[c.tagName] = c.children.length ? schedLeaf(c) : c.textContent; return o; }
+    const schedKids = (el, tag) => (el ? [...el.children].filter(c => c.tagName === tag) : []);
+    function schedParseDate(v) {
+        const s = String(v || '').trim();
+        let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if (m) return `${m[1].padStart(2, '0')}/${m[2].padStart(2, '0')}/${m[3]}`;
+        m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return `${m[2]}/${m[3]}/${m[1]}`;
+        return '';
+    }
+    // Detached table rows shaped like eCW's Billing grid, so the existing
+    // readers (cells[2]/[3] for ICD, td:nth-child(2) + units input for CPT) work.
+    function schedIcdRow(code, name) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td></td><td></td><td></td><td></td>';
+        tr.children[2].textContent = code; tr.children[3].textContent = name;
+        return tr;
+    }
+    function schedCptRow(code, name, units) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td></td><td></td><td></td><td><input data-fieldname="units"></td>';
+        tr.children[1].textContent = code; tr.children[2].textContent = name; tr.children[2].title = name;
+        tr.querySelector('input').value = units || '1.00';
+        return tr;
+    }
+    function schedNoteText(html) {
+        const blocky = String(html || '')
+            .replace(/<\s*br\s*\/?>/gi, '\n')
+            .replace(/<\/\s*(p|div|tr|li|h\d|table|ul|ol)\s*>/gi, '\n')
+            .replace(/<\/\s*td\s*>/gi, '\t');
+        const doc = new DOMParser().parseFromString(blocky, 'text/html');
+        doc.querySelectorAll('script, style').forEach(n => n.remove());
+        return (doc.body ? doc.body.textContent : '').split('\n').map(l => l.replace(/[ \u00a0]+/g, ' ').replace(/\t+/g, '\t').trim()).filter(Boolean).join('\n');
+    }
+    async function schedLoad(v) {
+        const encId = String(v.encounterId), pid = String(v.patientId);
+        const trUser = (pageGlobal('global') && pageGlobal('global').TrUserId) || '';
+        const noteUrl = `/mobiledoc/jsp/catalog/xml/printChartOptions.jsp?FormData=Default&isHtml=true&requestFrom=RCP&style=ModernII&encType=1&Device=webemr&ecwappprocessid=0&TrUserId=${encodeURIComponent(trUser)}&encounterID=${encodeURIComponent(encId)}`;
+        const [asmXml, billXml, insXml, encXml, noteHtml] = await Promise.all([
+            schedGet('/mobiledoc/jsp/catalog/xml/getAssessment.jsp?Id=' + encodeURIComponent(encId)),
+            schedGet('/mobiledoc/jsp/catalog/xml/getEncAddtlBillingData.jsp?Id=' + encodeURIComponent(encId)),
+            schedGet('/mobiledoc/jsp/catalog/xml/getPtInsurances.jsp?patientid=' + encodeURIComponent(pid)).catch(() => ''),
+            schedGet('/mobiledoc/jsp/catalog/xml/getPtEncounters.jsp?PatientId=' + encodeURIComponent(pid)).catch(() => ''),
+            schedGet(noteUrl).catch(() => '')
+        ]);
+        const xml = t => new DOMParser().parseFromString(t || '<x/>', 'text/xml');
+        // Diagnoses: primary first, then the others (same order Billing shows).
+        const asm = xml(asmXml).getElementsByTagName('assessment')[0];
+        if (!asm) throw new Error("couldn't read this visit's diagnoses");
+        const prim = schedKids(asm.getElementsByTagName('primary')[0], 'code').map(schedLeaf);
+        const sec = schedKids(asm.getElementsByTagName('secondary')[0], 'code').map(schedLeaf)
+            .filter(s => !prim.some(p => p.medicalcode === s.medicalcode && p.name === s.name));
+        const icd = [...prim, ...sec].filter(x => x.medicalcode).map(x => {
+            const code = String(x.medicalcode).trim().toUpperCase(), name = String(x.name || '').trim();
+            return { code, name, row: schedIcdRow(code, name) };
+        });
+        // Procedures, in Billing order.
+        const enc = xml(billXml).getElementsByTagName('encounter')[0];
+        if (!enc) throw new Error("couldn't read this visit's procedures");
+        const billId = (schedKids(enc, 'id')[0]?.textContent || '').trim();
+        if (billId && billId !== encId) throw new Error('eCW replied for another visit');
+        const cpt = schedKids(schedKids(enc, 'billingdata')[0], 'item').map(schedLeaf).filter(x => x.code).map(x => {
+            const code = String(x.code).trim().toUpperCase(), name = String(x.name || '').trim();
+            return { code, name, units: x.units || '1.00', row: schedCptRow(code, name, x.units) };
+        });
+        // Insurance: the patient's primary active insurance.
+        let insurance = '';
+        const insRows = [...xml(insXml).getElementsByTagName('*')].filter(n => n.children.length && [...n.children].some(c => c.tagName === 'insuranceName')).map(schedLeaf);
+        const ins = insRows.find(r => String(r.SeqNo) === '1' && String(r.ActiveIns || '1') !== '0') || insRows[0];
+        if (ins) insurance = cleanInsuranceNameSnap(cleanInsuranceTextSnap(String(ins.insuranceName || '')));
+        // Visit list for History: this visit and the older ones (no phone encounters).
+        const visitDate = schedParseDate(v.encDate);
+        const toTs = d => { const m = d.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); return m ? +new Date(+m[3], +m[1] - 1, +m[2]) : 0; };
+        const encIds = {};
+        [...xml(encXml).getElementsByTagName('*')].filter(n => n.children.length).map(schedLeaf).forEach(r => {
+            const k = Object.keys(r);
+            const idK = k.find(x => /^(encounterid|encid)$/i.test(x)) || (k.includes('id') ? 'id' : null);
+            const dK = k.find(x => /date/i.test(x) && schedParseDate(r[x]));
+            const tK = k.find(x => /visittype|enctype|type/i.test(x));
+            if (!idK || !dK) return;
+            if (tK && /^tel/i.test(String(r[tK]))) return;
+            const d = schedParseDate(r[dK]);
+            if (visitDate && toTs(d) > toTs(visitDate)) return;
+            encIds[String(r[idK]).trim()] = d;
+        });
+        if (!encIds[encId]) encIds[encId] = visitDate;
+        return { icd, cpt, primary: prim[0] ? String(prim[0].medicalcode).trim().toUpperCase() : '', insurance, noteText: schedNoteText(noteHtml), encIds, visitDate };
+    }
+    async function schedSelect(v) {
+        if (!v) return;
+        const tok = ++schedLoadToken;
+        schedVisit = {
+            meta: v, encounterId: String(v.encounterId), patientId: String(v.patientId), name: String(v.name || ''),
+            dob: v.dob, sex: v.sex, encDate: schedParseDate(v.encDate), locked: String(v.encLock) === '1',
+            state: 'loading', icd: [], cpt: [], primary: '', noteText: '', insurance: ''
+        };
+        renderPanel(true);
+        try {
+            const data = await schedLoad(v);
+            if (tok !== schedLoadToken) return;
+            Object.assign(schedVisit, data, { state: 'ready' });
+            const api = window.__ecwPatientHistory;
+            if (api && api.setScheduleTarget) api.setScheduleTarget({ pid: schedVisit.patientId, encId: schedVisit.encounterId, dos: schedVisit.encDate, encIds: data.encIds });
+        } catch (err) {
+            if (tok !== schedLoadToken) return;
+            schedVisit.state = 'failed'; schedVisit.error = err.message || String(err);
+        }
+        renderPanel(true);
+    }
+    function schedClear() {
+        if (!schedVisit) return;
+        schedVisit = null; schedLoadToken++;
+        const api = window.__ecwPatientHistory;
+        if (api && api.setScheduleTarget) api.setScheduleTarget(null);
+    }
+    function schedStep(dir) {
+        const list = scheduleList() || [];
+        if (!list.length) return;
+        const i = schedVisit ? list.findIndex(v => String(v.encounterId) === schedVisit.encounterId) : -1;
+        schedSelect(list[(i + dir + list.length) % list.length]);
+    }
+    // Picking a patient by clicking their row on eCW's schedule (eCW's own
+    // behaviour for the click is left untouched).
+    document.addEventListener('click', e => {
+        if (!isPanelOpen() || chartIsOpen() || (panel && panel.contains(e.target))) return;
+        const list = scheduleList();
+        if (!list) return;
+        const ng = pageGlobal('angular');
+        for (let el = e.target; el && el !== document.body; el = el.parentElement) {
+            if (!el.hasAttribute || !el.hasAttribute('ng-repeat')) continue;
+            let sc = null; try { sc = ng && ng.element(el).scope(); } catch (err) { return; }
+            if (!sc) return;
+            const hit = Object.keys(sc).map(k => sc[k]).find(x => x && typeof x === 'object' && x.encounterId != null && x.patientId != null);
+            if (hit && String(hit.encounterId) !== (schedVisit && schedVisit.encounterId)) schedSelect(hit);
+            return;
+        }
+    }, true);
+    // Dots on eCW's schedule rows for visits looked at this session:
+    // amber = changes proposed, green = nothing to change, grey = locked.
+    const schedStatus = new Map();   // encounterId -> 'changes' | 'clean' | 'locked'
+    function schedRecordStatus() {
+        if (!schedReady()) return;
+        const n = pendingChangeCount() + (manualOrder.icd || manualOrder.cpt ? 1 : 0);
+        schedStatus.set(schedVisit.encounterId, schedVisit.locked ? 'locked' : n ? 'changes' : 'clean');
+    }
+    function schedDecorateRows() {
+        if (!schedStatus.size) return;
+        const ng = pageGlobal('angular');
+        if (!ng || !ng.element) return;
+        document.querySelectorAll('tr[ng-repeat]').forEach(tr => {
+            let sc = null; try { sc = ng.element(tr).scope(); } catch (e) { return; }
+            const v = sc && Object.keys(sc).map(k => sc[k]).find(x => x && typeof x === 'object' && x.encounterId != null && x.patientId != null);
+            if (!v) return;
+            const st = schedStatus.get(String(v.encounterId));
+            let dot = tr.querySelector('.smc-sched-dot');
+            if (!st) { if (dot) dot.remove(); return; }
+            if (!dot) {
+                const cell = tr.querySelector('td');
+                if (!cell) return;
+                dot = document.createElement('span'); dot.className = 'smc-sched-dot';
+                cell.insertBefore(dot, cell.firstChild);
+            }
+            const color = { changes: '#e0a100', clean: '#2e9d57', locked: '#9aa5a8' }[st];
+            const label = { changes: 'ECW Pilot: changes proposed', clean: 'ECW Pilot: nothing to change', locked: 'ECW Pilot: locked visit' }[st];
+            if (dot.dataset.st !== st) {
+                dot.dataset.st = st; dot.title = label; dot.setAttribute('aria-label', label);
+                dot.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:1px;background:${color}`;
+            }
+        });
+    }
+    function schedNavHtml() {
+        if (!schedMode()) return '';
+        const list = scheduleList() || [];
+        const i = list.findIndex(v => String(v.encounterId) === schedVisit.encounterId);
+        const st = schedVisit.state === 'loading' ? ' · loading…' : schedVisit.state === 'failed' ? ' · couldn’t load' : '';
+        return `<div class="smc-sched">
+            <button type="button" class="smc-icon-btn" data-act="sched-prev" aria-label="Previous patient">‹</button>
+            <div class="smc-sched-mid"><span class="smc-sched-tag">From the schedule — chart not opened</span>
+              <span>Visit ${i + 1} of ${list.length} · ${escapeHtml(String(schedVisit.meta.viewApptTime || schedVisit.meta.time || ''))}${schedVisit.locked ? ' · locked' : ''}${st}</span></div>
+            <button type="button" class="smc-icon-btn" data-act="sched-next" aria-label="Next patient">›</button>
+        </div>`;
+    }
+
+    // ====================== SCHEDULE MODE: SAVE (Add to EMR) ======================
+    // Saves the panel's final claim for the picked visit the way eCW's Billing
+    // screen does (setAssessment.jsp + setEncAddtlBillingData.jsp, built with
+    // eCW's own XML helpers), in one go: added/removed codes, order, primary,
+    // modifiers (Smart Sort) and pointers (Link). Then reads the visit back and
+    // checks the result. A removed CPT line is deleted first with eCW's own
+    // call (pnBillingService.deleteCpt → deleteEncAddtlBillingData.jsp).
+    let schedSavedOnce = false;
+    const schedGlobalsMissing = () => ['XMLWriter', 'startSoapPacket', 'endSoapPacket', 'addElement', 'wrapAsXmlCDATA'].filter(n => typeof pageGlobal(n) !== 'function');
+    async function schedPost(path, fields) {
+        const r = await fetch(schedUrl(path), {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams(fields).toString()
+        });
+        const t = await r.text();
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return t;
+    }
+    async function schedReadRaw(encId) {
+        const xml = t => new DOMParser().parseFromString(t || '<x/>', 'text/xml');
+        const [a, b] = await Promise.all([
+            schedGet('/mobiledoc/jsp/catalog/xml/getAssessment.jsp?Id=' + encodeURIComponent(encId)),
+            schedGet('/mobiledoc/jsp/catalog/xml/getEncAddtlBillingData.jsp?Id=' + encodeURIComponent(encId))
+        ]);
+        const asm = xml(a).getElementsByTagName('assessment')[0];
+        const enc = xml(b).getElementsByTagName('encounter')[0];
+        if (!asm || !enc) throw new Error("couldn't read the visit's codes");
+        const billId = (schedKids(enc, 'id')[0]?.textContent || '').trim();
+        if (billId && billId !== String(encId)) throw new Error('eCW replied for another visit');
+        const primary = schedKids(asm.getElementsByTagName('primary')[0], 'code').map(schedLeaf);
+        const secondary = schedKids(asm.getElementsByTagName('secondary')[0], 'code').map(schedLeaf)
+            .filter(s => !primary.some(p => p.medicalcode === s.medicalcode && p.name === s.name));
+        return { primary, secondary, cpt: schedKids(schedKids(enc, 'billingdata')[0], 'item').map(schedLeaf) };
+    }
+    function schedSoap(build) {
+        const xw = new (pageGlobal('XMLWriter'))('ISO-8859-1', '1.0');
+        pageGlobal('startSoapPacket')(xw); build(xw); pageGlobal('endSoapPacket')(xw);
+        return xw.flush();
+    }
+    const schedAe = (xw, n, v) => pageGlobal('addElement')(xw, n, v, 'xsi:type', 'xsd:string');
+    const schedCd = v => pageGlobal('wrapAsXmlCDATA')(v);
+    const schedNz = v => (v === undefined || v === null ? '' : v);
+    function schedSettingOn(key) { try { return String(pageGlobal('getItemKeyValue')(key, true)) === '1'; } catch (e) { return false; } }
+    function schedCanViewRef() { try { return !!pageGlobal('getPermission')('ViewReferenceMaterialOnAssessmentsWindow', pageGlobal('global').TrUserId); } catch (e) { return false; } }
+    // = eCW parseAndAddIcdDetailsXmlTag (and the secondary loop of icdXml)
+    function schedWriteIcd(xw, o, displayIndex, dual, viewRef) {
+        xw.writeStartElement('code'); xw.writeAttributeString('xsi:type', 'xsd:string');
+        schedAe(xw, 'id', o.id); schedAe(xw, 'slNo', schedNz(o.slNo)); schedAe(xw, 'medicalcode', o.medicalcode); schedAe(xw, 'name', schedCd(o.name));
+        schedAe(xw, 'specify', schedCd(o.specify) ? '<![CDATA[' + o.specify + ']]>' : '');
+        schedAe(xw, 'notes', schedCd(o.notes) ? '<![CDATA[' + o.notes + ']]>' : '');
+        schedAe(xw, 'specifyHtml', '<![CDATA[' + schedNz(o.specifyHtml) + ']]>'); schedAe(xw, 'notesHtml', '<![CDATA[' + schedNz(o.notesHtml) + ']]>');
+        schedAe(xw, 'OnsetDate', schedNz(o.OnsetDate)); schedAe(xw, 'displayIndex', displayIndex); schedAe(xw, 'risk', schedNz(o.risk)); schedAe(xw, 'axis', schedNz(o.axis));
+        schedAe(xw, 'snowMedCode', schedNz(o.snowMedCode)); schedAe(xw, 'synonymid', schedNz(o.synonymid)); schedAe(xw, 'snomedSource', schedNz(o.snomedSource)); schedAe(xw, 'resolvedOn', schedNz(o.resolvedOn));
+        if (viewRef) schedAe(xw, 'viewedReferenceMaterial', o.isReferenceMaterialViewed && o.referenceMaterialId ? o.referenceMaterialId : 0);
+        if (o.modifyflag) schedAe(xw, 'modifyflag', o.modifyflag);
+        if (dual) { schedAe(xw, 'icd9itemid', schedNz(o.icd9itemid)); schedAe(xw, 'icd9code', schedNz(o.icd9code)); schedAe(xw, 'icd10itemid', schedNz(o.icd10itemid)); schedAe(xw, 'icd10code', schedNz(o.icd10code)); }
+        xw.writeEndElement();
+    }
+    function schedIcdXml(primaryObj, secondaryObjs, deletedObjs, encId) {   // = eCW icdXml
+        const dual = schedSettingOn('SaveInDualEnc'), viewRef = schedCanViewRef();
+        return schedSoap(xw => {
+            xw.writeStartElement('return'); xw.writeAttributeString('xsi:type', 'xsd:string');
+            schedAe(xw, 'requestSource', 'VBClient');
+            xw.writeStartElement('assessment'); xw.writeAttributeString('xsi:type', 'xsd:string');
+            pageGlobal('addElement')(xw, 'EncounterId', encId, 'xsi:type', 'xsd:int');
+            xw.writeStartElement('primary'); xw.writeAttributeString('xsi:type', 'xsd:string');
+            if (primaryObj) schedWriteIcd(xw, primaryObj, 1, dual, viewRef);
+            xw.writeEndElement();
+            xw.writeStartElement('safeicddelete');
+            deletedObjs.forEach((o, i) => schedWriteIcd(xw, o, i + 1, dual, viewRef));
+            xw.writeEndElement();
+            xw.writeStartElement('secondary'); xw.writeAttributeString('xsi:type', 'xsd:string');
+            secondaryObjs.forEach((o, i) => schedWriteIcd(xw, o, i + 1, dual, viewRef));
+            xw.writeEndElement();
+            xw.writeEndElement(); xw.writeEndElement();
+        });
+    }
+    function schedCptXml(items, encId) {   // = eCW cptXml
+        return schedSoap(xw => {
+            xw.writeStartElement('return'); xw.writeAttributeString('xsi:type', 'xsd:string');
+            xw.writeStartElement('encounter'); xw.writeAttributeString('xsi:type', 'xsd:string');
+            pageGlobal('addElement')(xw, 'id', encId, 'xsi:type', 'xsd:int');
+            xw.writeStartElement('billingdata'); xw.writeAttributeString('xsi:type', 'xsd:string');
+            items.forEach((c, i) => {
+                xw.writeStartElement('item'); xw.writeAttributeString('xsi:type', 'xsd:string');
+                schedAe(xw, 'id', c.id); schedAe(xw, 'billingid', c.billingid ? c.billingid : '0');
+                ['mod1', 'mod2', 'mod3', 'mod4'].forEach(m => schedAe(xw, m, c[m] ? schedCd(c[m]) : ''));
+                schedAe(xw, 'units', c.units ? c.units : '1.00');
+                schedAe(xw, 'notes', c.notes ? '<![CDATA[' + c.notes + ']]>' : '');
+                schedAe(xw, 'displayIndex', i + 1);
+                schedAe(xw, 'codeFlag', c.codeFlag ? c.codeFlag : 'C');
+                [1, 2, 3, 4].forEach(n => schedAe(xw, 'icd' + n, c['icd' + n] ? c['icd' + n] : ''));
+                [1, 2, 3, 4].forEach(n => schedAe(xw, 'icdcode' + n, c['icdcode' + n] ? schedCd(c['icdcode' + n]) : ''));
+                schedAe(xw, 'tthno', c.tthno ? schedCd(c.tthno) : ''); schedAe(xw, 'srfc', c.srfc ? schedCd(c.srfc) : ''); schedAe(xw, 'TimeMins', c.TimeMins ? c.TimeMins : '');
+                xw.writeEndElement();
+            });
+            xw.writeEndElement(); xw.writeEndElement(); xw.writeEndElement();
+        });
+    }
+    const schedSaveOk = t => /<status[^>]*>\s*success\s*<\/status>/i.test(t);
+    const schedUp = v => String(v || '').trim().toUpperCase();
+    async function schedFindIcdItem(code) {
+        const exact = (await ecwFindICD(code)).filter(x => schedUp(x.code) === code && x.itemId);
+        const want = PREFERRED_ITEM_IDS[code];
+        const hit = want ? exact.find(x => String(x.itemId).trim() === want) : exact[0];
+        if (!hit) throw new Error(want ? `${code}: eCW entry ${want} not found — nothing saved` : `${code} not found in eCW — nothing saved`);
+        return hit;
+    }
+    async function schedFindCptItem(code) {
+        const list = (await ecwFindCPT(code, isEmCode(code))).filter(x => schedUp(x.code) === code && x.itemId);
+        const want = PREFERRED_ITEM_IDS[code];
+        const hit = want ? list.find(x => String(x.itemId).trim() === want) : list[0];
+        if (!hit) throw new Error(want ? `${code}: eCW entry ${want} not found — nothing saved` : `${code} not found in eCW — nothing saved`);
+        return hit;
+    }
+    // What blocks a save from the schedule (null = can save).
+    function schedSaveBlocker() {
+        if (!schedReady()) return 'This visit is still loading';
+        if (schedVisit.locked) return 'This visit is locked';
+        const g = schedGlobalsMissing();
+        if (g.length) return "eCW's save tools aren't available on this page — reload eCW";
+        return null;
+    }
+    async function schedAddToEMR() {
+        const block = schedSaveBlocker();
+        if (block) { showToast(block); return; }
+        const v = schedVisit, encId = v.encounterId;
+        const prop = buildProposal(), sp = splitProposal(prop);
+        const icdDels = sp.icdDels.filter(d => isPicked('d', d)).map(d => schedUp(d.code));
+        const icdAdds = sp.icdAdds.filter(a => isPicked('a', a));
+        const cptAdds = sp.cptAdds.filter(a => isPicked('a', a));
+        const cptDels = sp.cptDels.filter(d => isPicked('d', d)).map(d => schedUp(d.code));
+        const manualOrderPending = !!(manualOrder.icd || manualOrder.cpt);
+        if (!schedSavedOnce) {
+            const conf = pageGlobal('confirm') || window.confirm;
+            if (!conf.call(window, `Save these changes to ${v.name}'s visit WITHOUT opening the chart?\n\nFirst save of this session — afterwards, open that chart and check Billing before saving more visits.`)) return;
+        }
+        // Remember the target before anything changes (same as in the chart).
+        const primaryTarget = predictedPrimary(readCurrentICD(), sp.icdAdds, sp.icdDels);
+        const icdOrderWanted = orderItems([
+            ...readCurrentICD().filter(x => !icdDels.includes(x.code)),
+            ...icdAdds.filter(a => !readCurrentICD().some(x => x.code === schedUp(a.code))).map(a => ({ code: schedUp(a.code) }))
+        ], 'icd').map(x => x.code);
+        const cptOrderWanted = orderItems([
+            ...readCurrentCPT().filter(x => !cptDels.includes(x.code)),
+            ...cptAdds.filter(a => !readCurrentCPT().some(x => x.code === schedUp(a.code))).map(a => ({ code: schedUp(a.code) }))
+        ], 'cpt').map(x => x.code);
+        actionRunning = true;
+        setHtmlIfChanged('smcFootSum', 'Saving to eCW…');
+        try {
+            // 0. eCW checks this is the right, unlocked visit
+            const hdr = JSON.parse(await schedPost('/mobiledoc/emr/assessment.ecw/getInitAssessmentData', { encounterId: encId, patientId: v.patientId, isV2: true })).asmtAttrJson || {};
+            if (String(hdr.encounterId) !== encId || String(hdr.patientId) !== v.patientId) throw new Error('eCW replied for another visit — nothing saved');
+            if (String(hdr.nEncLock) === '1') throw new Error('this visit is locked — nothing saved');
+            const before = await schedReadRaw(encId);
+            // Look up every new code first, so a missing catalog entry stops
+            // the save before anything at all is written.
+            const icdItems = new Map(), cptItems = new Map();
+            for (const a of icdAdds) { const code = schedUp(a.code); if (!icdItems.has(code)) icdItems.set(code, await schedFindIcdItem(code)); }
+            for (const a of cptAdds) { const code = schedUp(a.code); if (!cptItems.has(code) && !before.cpt.some(it => schedUp(it.code) === code)) cptItems.set(code, await schedFindCptItem(code)); }
+            const allBefore = [...before.primary, ...before.secondary];
+            const oldPrimary = before.primary[0] ? schedUp(before.primary[0].medicalcode) : '';
+            // 1. diagnoses: keep, remove, add, then order with the primary first
+            const kept = allBefore.filter(o => !icdDels.includes(schedUp(o.medicalcode)));
+            const deleted = allBefore.filter(o => icdDels.includes(schedUp(o.medicalcode)));
+            const added = [];
+            for (const a of icdAdds) {
+                const code = schedUp(a.code);
+                if (kept.some(o => schedUp(o.medicalcode) === code)) continue;
+                const it = icdItems.get(code);
+                const hs = { id: it.itemId, medicalcode: it.code, name: it.name, specify: '', notes: '', specifyHtml: '', notesHtml: '', OnsetDate: '', risk: '', axis: '', snowMedCode: it.snowMedCode || '', synonymid: '', snomedSource: '', resolvedOn: '', modifyflag: 'insert' };
+                if (schedSettingOn('SaveInDualEnc')) { hs.icd9itemid = it.itemId; hs.icd9code = it.code; hs.icd10itemid = '0'; hs.icd10code = ''; }
+                added.push(hs);
+            }
+            const finalIcd = [...kept, ...added];
+            const pos = o => { const i = icdOrderWanted.indexOf(schedUp(o.medicalcode)); return i < 0 ? 999 : i; };
+            finalIcd.sort((x, y) => pos(x) - pos(y));
+            const primaryCode = primaryTarget ? schedUp(primaryTarget.code) : '';
+            const primaryObj = finalIcd.find(o => schedUp(o.medicalcode) === primaryCode) || null;
+            const secondaryObjs = finalIcd.filter(o => o !== primaryObj);
+            // existing diagnoses whose place or primary status changed are sent as 'update'
+            const oldSecondary = before.secondary.map(o => schedUp(o.medicalcode));
+            secondaryObjs.forEach((o, i) => { if (o.modifyflag !== 'insert' && (oldSecondary.indexOf(schedUp(o.medicalcode)) !== i || schedUp(o.medicalcode) === oldPrimary)) o.modifyflag = 'update'; });
+            if (primaryObj && primaryObj.modifyflag !== 'insert' && schedUp(primaryObj.medicalcode) !== oldPrimary) primaryObj.modifyflag = 'update';
+            const icdChanged = deleted.length || added.length || primaryCode !== oldPrimary || secondaryObjs.some(o => o.modifyflag === 'update');
+            if (icdChanged) {
+                const res = await schedPost('/mobiledoc/jsp/catalog/xml/setAssessment.jsp?Id=' + encodeURIComponent(encId), { FormData: schedIcdXml(primaryObj, secondaryObjs, deleted, encId) });
+                if (!schedSaveOk(res)) throw new Error("eCW didn't accept the diagnoses");
+            }
+            const icdRows = [primaryObj, ...secondaryObjs].filter(Boolean).map(o => schedUp(o.medicalcode));   // eCW row order
+            // 2. procedures: delete removed lines (eCW's own call), then keep,
+            //    add, order, modifiers (Smart Sort), pointers (Link)
+            for (const it of before.cpt.filter(x => cptDels.includes(schedUp(x.code)))) {
+                const bid = parseInt(it.billingid, 10);
+                let path = '/mobiledoc/jsp/catalog/xml/deleteEncAddtlBillingData.jsp?encounterId=' + encodeURIComponent(encId) + '&itemId=' + encodeURIComponent(it.id);
+                if (bid > 0) path += '&billingDataId=' + bid;
+                await schedGet(path);
+            }
+            const items = before.cpt.filter(x => !cptDels.includes(schedUp(x.code))).map(it => Object.assign({}, it));
+            for (const a of cptAdds) {
+                const code = schedUp(a.code);
+                if (items.some(it => schedUp(it.code) === code)) continue;
+                const it = cptItems.get(code);
+                items.push({ id: it.itemId, code, billingid: '0', mod1: '', mod2: '', mod3: '', mod4: '', units: a.units ? Number(a.units).toFixed(2) : '1.00', notes: '', codeFlag: isEmCode(code) ? 'E' : 'C',
+                    icd1: '', icd2: '', icd3: '', icd4: '', icdcode1: '', icdcode2: '', icdcode3: '', icdcode4: '', tthno: '', srfc: '', TimeMins: '', isNew: true });
+            }
+            const cpos = it => { const i = cptOrderWanted.indexOf(schedUp(it.code)); return i < 0 ? 999 : i; };
+            items.sort((x, y) => cpos(x) - cpos(y));
+            const age = getAgeAtDOS('');
+            if (smartSortOn() && PILOT && PILOT.smartSort && PILOT.smartSort.planModifiers) {
+                const plan = PILOT.smartSort.planModifiers(items.map(it => ({ code: schedUp(it.code), mod1: it.mod1 || '' })));
+                items.forEach(it => { const m = plan.get(schedUp(it.code)); if (m !== undefined) it.mod1 = m; });
+            }
+            const linkOn = !!(PILOT && PILOT.settings && PILOT.settings.get('link') && typeof PILOT.linkPlan === 'function');
+            if (linkOn) {
+                const lp = PILOT.linkPlan(items.map(it => schedUp(it.code)), icdRows, age);
+                items.forEach((it, i) => {
+                    const p = lp[i]; if (!p) return;
+                    for (let s = 1; s <= 4; s++) { const pick = p.picks[s - 1]; it['icd' + s] = pick ? String(pick.rowNum) : ''; it['icdcode' + s] = pick ? pick.code : ''; }
+                    if (p.sl && !it.mod1) it.mod1 = 'SL';
+                    if (!p.sl && schedUp(it.mod1) === 'SL') it.mod1 = '';
+                });
+            } else {
+                // Link off: keep pointers, but a pointer must follow its diagnosis to its new row
+                items.forEach(it => { for (let s = 1; s <= 4; s++) { const c = schedUp(it['icdcode' + s]); if (c) { const r = icdRows.indexOf(c) + 1; it['icd' + s] = r > 0 ? String(r) : ''; if (!r) it['icdcode' + s] = ''; } } });
+            }
+            const res2 = await schedPost('/mobiledoc/jsp/catalog/xml/setEncAddtlBillingData.jsp?Id=' + encodeURIComponent(encId), { FormData: schedCptXml(items, encId) });
+            if (!schedSaveOk(res2)) throw new Error("eCW didn't accept the procedures" + (icdChanged ? ' (the diagnoses were saved — open the chart to finish)' : ''));
+            // 3. read back and check
+            const after = await schedReadRaw(encId);
+            const icdNow = [...after.primary, ...after.secondary].map(o => schedUp(o.medicalcode));
+            const cptNow = after.cpt.map(it => schedUp(it.code));
+            const missing = [...icdRows.filter(c => !icdNow.includes(c)), ...items.map(it => schedUp(it.code)).filter(c => !cptNow.includes(c))];
+            const extra = [...icdDels.filter(c => icdNow.includes(c)), ...cptDels.filter(c => cptNow.includes(c) && !items.some(it => schedUp(it.code) === c))];
+            const primNow = after.primary[0] ? schedUp(after.primary[0].medicalcode) : '';
+            if (missing.length || extra.length || (primaryCode && primNow !== primaryCode)) {
+                throw new Error('saved, but the check found a difference' + (missing.length ? ' — missing: ' + missing.join(', ') : '') + (extra.length ? ' — still there: ' + extra.join(', ') : '') + (primaryCode && primNow !== primaryCode ? ` — primary is ${primNow || 'none'}, expected ${primaryCode}` : '') + '. Open the chart and check it.');
+            }
+            schedSavedOnce = true;
+            manualDel = new Map(); manualOrder = { icd: null, cpt: null }; pick = {}; activeQuick = null; activePlan = null;
+            showToast(`Saved to ${v.name}'s visit and checked` + (manualOrderPending ? ' (your order included)' : ''));
+            actionRunning = false;
+            await schedSelect(v.meta);
+        } catch (err) {
+            actionRunning = false;
+            console.error('[ECW Pilot] schedule save failed', err);
+            showToast('Not saved: ' + (err.message || err));
+            renderPanel(true);
+        }
+    }
+
     // All age-dependent rules use the age ON THE VISIT DAY (see above).
     // `text` is no longer used (the old header/"yo" text scan is gone).
     function getAgeAtDOS(text) {
@@ -737,6 +1204,7 @@
     // GENDERINITIALS span sits next to the age span in the patient header;
     // read it off the DOM with text fallbacks.
     function getGenderFromDOM() {
+        if (schedMode()) { const s = String(schedVisit.sex || '').trim().toUpperCase(); return /^[MFOU]/.test(s) ? s[0] : ''; }
         const genderSpan = document.querySelector('span[ng-bind*="GENDERINITIALS"]');
         if (genderSpan) {
             const t = (genderSpan.textContent || "").replace(/^[,\s]+/, "").trim().toUpperCase();
@@ -804,6 +1272,7 @@
     function parseInsuranceFromPage(text) {
         const fromHistory = getInsuranceFromHistoryForCurrentDos();
         if (fromHistory) return fromHistory;
+        if (schedMode()) return schedVisit.insurance || '';
 
         const cells = document.querySelectorAll("tr.PatientData td, tr.PtData td");
         for (const cell of cells) {
@@ -1609,12 +2078,14 @@
     ]);
 
     function getCPTRows() {
+        if (schedMode()) return schedVisit.cpt.map(x => x.row);
         return Array.from(document.querySelectorAll('#billingTbl4 tbody tr'));
     }
 
     // ICD grid: #billingTbl2, code lives in the 3rd <td> (title + text = the
     // code itself, e.g. "M54.5"), diagnosis name lives in the 4th <td>.
     function getICDRows() {
+        if (schedMode()) return schedVisit.icd.map(x => ({ row: x.row, code: x.code, name: x.name }));
         return Array.from(document.querySelectorAll('#billingTbl2 tbody tr')).map(row => {
             const cells = row.querySelectorAll('td');
             const code = (cells[2]?.textContent || '').trim();
@@ -1908,6 +2379,7 @@
 
     let lastAgeUnknownKey = null;
     function computeAnalysis() {
+        if (onSchedulePage() && !schedReady()) return { toAdd: [], toDelete: [], insurance: '', schedPending: true };
         const text = getEncounterText();
         const insurance = parseInsuranceFromPage(text);
         // Vitals of the OPEN visit, from eCW's Vitals data (never page text).
@@ -3111,6 +3583,7 @@
     }
 
     function getBillingScope() {
+        if (schedMode()) return null;   // no Billing screen on the schedule
         const btn = document.querySelector('#billingBtn1');
         const ng = pageGlobal('angular');
         if (!btn || !ng || !ng.element) return null;
@@ -3163,7 +3636,7 @@
         ae(xw, 'code', String(code).trim().toLowerCase(), 'xsi:type', 'xsd:string');
         ae(xw, 'keyName', 'Assessments', 'xsi:type', 'xsd:string');
         ae(xw, 'ShowCodes', '1', 'xsi:type', 'xsd:string');
-        ae(xw, 'ValidDate', scope.encounterDate || '', 'xsi:type', 'xsd:string');
+        ae(xw, 'ValidDate', (scope && scope.encounterDate) || getCurrentDOSStr() || '', 'xsi:type', 'xsd:string');
         ae(xw, 'counter', '1', 'xsi:type', 'xsd:string');
         ae(xw, 'maxcount', '12', 'xsi:type', 'xsd:string');
         ae(xw, 'StartWith', 'Starts With', 'xsi:type', 'xsd:string');
@@ -3288,7 +3761,7 @@
         const scope = getBillingScope();
         const doc = await ecwPostLookup(
             '/mobiledoc/jsp/catalog/xml/edi/LookupCPTCodes.jsp?parentId=0&encId=' +
-                encodeURIComponent(scope.encounterId),
+                encodeURIComponent((scope && scope.encounterId) || (schedMode() ? schedVisit.encounterId : '')),
             ecwCreateCPTLookupXml(code, catalog)
         );
         return [...doc.querySelectorAll('procedures > procedure')].map(ecwChildMap);
@@ -3525,6 +3998,7 @@
     }
 
     function getICDGridEntriesFast() {
+        if (schedMode()) return schedVisit.icd.map(x => ({ code: x.code, name: x.name }));
         return Array.from(document.querySelectorAll('#billingTbl2 tbody tr')).map(row => {
             const cells = row.querySelectorAll('td');
             const code = (cells[2]?.textContent || '').trim();
@@ -3781,6 +4255,12 @@
     // always on the page (often missing on the Billing tab), so it also
     // looks for a visit-type word in the encounter drop-down.
     function getVisitType() {
+        if (schedMode()) {
+            const t = String(schedVisit.meta.visitType || schedVisit.meta.visitTypeDesc || '').trim();
+            if (/^(NEW|NP)\b|new\s*patient/i.test(t)) return 'NP';
+            if (/^(EST|ESTPT)\b|established/i.test(t)) return 'ESTPT';
+            return t;
+        }
         const span = document.querySelector('span.appt-caption-main[ng-bind="apptCaption"]');
         const raw = span ? (span.getAttribute('title') || span.textContent || '') : '';
         const m = raw.match(/,\s*([^,)]+)\)/);
@@ -3842,6 +4322,7 @@
     ]);
 
     function getCurrentDOSStr() {
+        if (schedMode()) return schedVisit.encDate || '';
         return document.querySelector("#encDropDownItem")?.title?.match(/\b\d{2}\/\d{2}\/\d{4}\b/)?.[0] || "";
     }
 
@@ -4178,6 +4659,7 @@
     // LookupDiagnosisCodes.jsp / LookupCPTCodes.jsp request used to add
     // them — fetched in the background and cached per code.
     function scopeBillingName(kind, code) {
+        if (schedMode()) { const hit = (kind === 'icd' ? schedVisit.icd : schedVisit.cpt).find(x => x.code === code); return hit ? hit.name : ''; }
         const sc = getBillingScope();
         if (!sc) return '';
         const arr = kind === 'icd' ? sc.icdData : sc.cptData;
@@ -4247,14 +4729,17 @@
         }).filter(x => x.code);
     }
     function hasBillingGrids() {
+        if (schedReady()) return true;
         return !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
     }
     function getPatientName() {
+        if (schedMode()) return schedVisit.name;
         const el = document.querySelector('span[ng-bind*="FULL_NAME"]');
         const raw = el ? (el.getAttribute('title') || el.textContent || '') : '';
         return raw.replace(/,\s*[MFOU]\s*$/i, '').trim();
     }
     function getEncounterKey() {
+        if (schedMode()) return 'sched_' + schedVisit.encounterId;
         const pid = (window.__ecwPatientHistory && window.__ecwPatientHistory.getCurrentKey)
             ? (window.__ecwPatientHistory.getCurrentKey() || '') : '';
         return `${pid}_${getCurrentDOSStr()}`;
@@ -4630,7 +5115,11 @@
             readCurrentCPT().map(x => `${x.code}x${x.units}`).join(','),
             isWeekendEnabled() ? 'W' : '',
             api && api.isLoading && api.isLoading() ? 'L' : (api && api.getEncounterCount ? api.getEncounterCount() : 0),
-            (cachedEncounterText || '').length
+            (cachedEncounterText || '').length,
+            // re-run once the visit's vitals / chief complaint (and, on the
+            // schedule, the visit itself) have finished loading
+            getVisitVitals().state, getVisitCC().state,
+            schedMode() ? schedVisit.state + ':' + (schedVisit.noteText || '').length : ''
         ].join('|');
         if (sig === lastAnalysisSig) return;
         lastAnalysisSig = sig;
@@ -4655,6 +5144,7 @@
     }
 
     async function addToEMR() {
+        if (schedMode()) { if (!actionRunning) await schedAddToEMR(); return; }
         if (actionRunning || !hasBillingGrids()) return;
         if (!historyReadyState().ready) { showToast('Add to EMR is available once patient history has finished loading'); return; }
         const prop = buildProposal();
@@ -4804,6 +5294,7 @@
     // Live primary = eCW's primaryArr (what the ★ shows); the saved
     // isPrimaryAsmt flag only if eCW has no primaryArr.
     function livePrimaryCode() {
+        if (schedMode()) return schedVisit.primary || '';
         const ng = pageGlobal('angular');
         const el = document.querySelector('#billingTbl2');
         if (!el || !ng || !ng.element) return '';
@@ -5246,8 +5737,17 @@
         if (actionRunning) return null; // setBusyStatus owns the footer while applying
         if (!hasBillingGrids()) return { sum: 'Open the Billing tab to add codes', disabled: true };
         if (reviewActive()) return { sum: 'Added to EMR — no further changes needed. Forgot a counseling? Pick it above.', disabled: true, count: 0 };
+        if (schedMode() && schedVisit.state === 'loading') return { sum: 'Loading this visit from eCW…', disabled: true };
+        if (schedMode() && schedVisit.state === 'failed') return { sum: escapeHtml("Couldn't load this visit: " + (schedVisit.error || 'unknown error')), disabled: true };
         const hist = historyReadyState();
         if (!hist.ready) return { sum: escapeHtml(hist.text), disabled: true };
+        if (schedMode()) {
+            const n = pendingChangeCount() + (manualOrder.icd || manualOrder.cpt ? 1 : 0);
+            if (!n) return { sum: 'No changes needed', disabled: true, count: 0 };
+            const block = schedSaveBlocker();
+            if (block) return { sum: `<b>${n} proposed change${n === 1 ? '' : 's'}</b> — ${escapeHtml(block)}`, disabled: true, count: n };
+            return { sum: `<b>${n} proposed change${n === 1 ? '' : 's'}</b> — saved from the schedule, then checked`, disabled: false, count: n };
+        }
         const prop = buildProposal();
         const keys = [
             ...prop.toAdd.map(a => ({ k: keyOf('a', a.code), on: isPicked('a', a) })),
@@ -5616,6 +6116,10 @@
                 else if (act.dataset.act === 'reload') location.reload();
                 else if (act.dataset.act === 'dismiss') { resultNotice = null; renderPanel(); }
                 else if (act.dataset.act === 'ack-update') { if (PILOT && PILOT.ackUpdate) PILOT.ackUpdate(); renderPanel(true); }
+                else if (act.dataset.act === 'sched-prev' || act.dataset.act === 'sched-next') {
+                    e.preventDefault();
+                    schedStep(act.dataset.act === 'sched-next' ? 1 : -1);
+                }
                 else if (act.dataset.act === 'manual-del') {
                     e.preventDefault();
                     const code = String(act.dataset.code || '').toUpperCase();
@@ -5812,7 +6316,7 @@
         const gender = getGenderFromDOM();
         const insurance = parseInsuranceFromPage(text);
         const name = getPatientName();
-        setHtmlIfChanged('smcHeadInfo', `
+        setHtmlIfChanged('smcHeadInfo', `${schedNavHtml()}
             <div class="smc-pt-name">${escapeHtml(name || 'Current patient')}</div>
             <div class="smc-pt-meta">
                 <span><b>${age != null ? age + ' y' : '—'}</b> ${escapeHtml(genderLabel(gender).toLowerCase())}</span>
@@ -5946,7 +6450,7 @@
         // either billing grid exists at all, we're definitely not in a
         // chart/coding context, so skip the expensive innerText scan.
         const hasEncDropdown = !!document.getElementById('encDropDownItem');
-        const hasBillingGrid = hasBillingGrids();
+        const hasBillingGrid = !!document.getElementById('billingTbl2') || !!document.getElementById('billingTbl4');
         if (!hasEncDropdown && !hasBillingGrid) return false;
 
         const liveText = getPageTextExcludingPanel();
@@ -5971,6 +6475,7 @@
     // last time the SOAP note was actually visible, falling back to a live
     // read only if nothing has been cached yet.
     function getEncounterText() {
+        if (schedMode()) return schedVisit.noteText || '';
         return cachedEncounterText || getPageTextExcludingPanel();
     }
 
@@ -5983,6 +6488,20 @@
         if (document.readyState !== 'complete') return;
 
         const onChart = isPatientChart();
+        if (onChart && schedVisit) schedClear();
+
+        if (!onChart && onSchedulePage()) {
+            if (!isPanelOpen()) { showLauncher(); updateLauncherBadge(); }
+            else {
+                if (!schedVisit) schedSelect((scheduleList() || [])[0]);
+                renderPanel();
+                schedRecordStatus();
+            }
+            schedDecorateRows();
+            syncExternalButtons();
+            return;
+        }
+        if (!onChart && schedVisit) schedClear();
 
         if (onChart) {
             if (!isPanelOpen()) { showLauncher(); updateLauncherBadge(); }

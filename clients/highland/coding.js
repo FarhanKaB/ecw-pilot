@@ -276,6 +276,24 @@
         #smcPanel .smc-rm { top: 7px; right: 6px; font-size: 15px; }
         #smcPanel .smc-rm:hover { background: var(--smc-del-soft); color: var(--smc-del); border-color: var(--smc-del); }
         #smcPanel .smc-reset { margin-left: 8px; font-size: 11px; }
+        #smcSchedSide { position: fixed; top: 0; bottom: 0; width: 250px; z-index: 999997; display: flex; flex-direction: column;
+            background: #f7faf9; color: #1b2a2f; border-left: 1px solid #d9e0de; border-right: 1px solid #d9e0de;
+            box-shadow: -8px 0 24px rgba(27,42,47,.10); font: 13px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif; text-align: left; }
+        #smcSchedSide[hidden] { display: none; }
+        #smcSchedSide .ss-h { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px 10px; border-bottom: 1px solid #d9e0de; color: #4a5b60; font-size: 12px; }
+        #smcSchedSide .ss-h b { color: #1b2a2f; font-weight: 600; margin-left: 4px; }
+        #smcSchedSide .ss-x { width: 24px; height: 24px; border: 1px solid #d9e0de; border-radius: 5px; background: #fff; color: #4a5b60; cursor: pointer; font-size: 15px; line-height: 1; }
+        #smcSchedSide .ss-x:hover { color: #1b2a2f; border-color: #7f8d91; }
+        #smcSchedSide .ss-list { overflow: auto; flex: 1; }
+        #smcSchedSide .ss-row { display: flex; gap: 9px; align-items: center; width: 100%; padding: 9px 12px; border: 0; border-bottom: 1px solid #e8edeb; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+        #smcSchedSide .ss-row:hover { background: #eef3f2; }
+        #smcSchedSide .ss-row.on { background: #e8f1fb; box-shadow: inset 3px 0 0 #1d4f8a; }
+        #smcSchedSide .ss-row.on .ss-n { color: #1d4f8a; }
+        #smcSchedSide .ss-row:focus-visible, #smcSchedSide .ss-x:focus-visible { outline: 2px solid #1d4f8a; outline-offset: -2px; }
+        #smcSchedSide .ss-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; border: 1px solid; }
+        #smcSchedSide .ss-main { display: flex; flex-direction: column; min-width: 0; }
+        #smcSchedSide .ss-n { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        #smcSchedSide .ss-m { color: #7f8d91; font-size: 11.5px; }
         #smcPanel .smc-sched { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 6px 8px; border-radius: 8px; background: #e8f1fb; color: #1d4f8a; }
         #smcPanel .smc-sched .smc-icon-btn { font-size: 18px; line-height: 1; }
         #smcPanel .smc-sched-mid { flex: 1; display: flex; flex-direction: column; align-items: center; font-size: 11.5px; text-align: center; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 4px; border-radius: 6px; font-family: inherit; }
@@ -931,30 +949,61 @@
             }
         });
     }
-    let schedListOpen = false;
+    let schedListOpen = true;    // patient list beside the panel (schedule mode)
     const SCHED_DOT = { changes: '#e0a100', clean: '#2e9d57', locked: '#9aa5a8' };
     function schedNavHtml() {
         if (!schedMode()) return '';
         const list = scheduleList() || [];
         const i = list.findIndex(v => String(v.encounterId) === schedVisit.encounterId);
         const st = schedVisit.state === 'loading' ? ' · loading…' : schedVisit.state === 'failed' ? ' · couldn’t load' : '';
-        const rows = schedListOpen ? `<div class="smc-sched-list" role="listbox" aria-label="Patients on this schedule">${list.map(v => {
-            const id = String(v.encounterId), on = id === schedVisit.encounterId;
-            const s = String(v.encLock) === '1' ? 'locked' : schedStatus.get(id);
-            return `<button type="button" class="smc-sched-row${on ? ' on' : ''}" role="option" aria-selected="${on}" data-act="sched-pick" data-enc="${escapeHtml(id)}">
-                <span class="smc-sched-dot2" style="background:${s ? SCHED_DOT[s] : 'transparent'};border-color:${s ? SCHED_DOT[s] : 'var(--smc-line)'}" title="${s === 'changes' ? 'Changes proposed' : s === 'clean' ? 'Nothing to change' : s === 'locked' ? 'Locked' : 'Not looked at yet'}"></span>
-                <span class="t">${escapeHtml(String(v.viewApptTime || v.time || ''))}</span>
-                <span class="n">${escapeHtml(String(v.name || ''))}</span>
-                <span class="k">${escapeHtml(String(v.visitType || ''))}${String(v.encLock) === '1' ? ' · locked' : ''}</span>
-            </button>`;
-        }).join('')}</div>` : '';
         return `<div class="smc-sched">
             <button type="button" class="smc-icon-btn" data-act="sched-prev" aria-label="Previous patient">‹</button>
-            <button type="button" class="smc-sched-mid" data-act="sched-list" aria-expanded="${schedListOpen}" title="Show the patients on this schedule">
+            <button type="button" class="smc-sched-mid" data-act="sched-list" aria-expanded="${schedListOpen}" title="${schedListOpen ? 'Hide' : 'Show'} the patient list">
               <span class="smc-sched-tag">From the schedule — chart not opened</span>
-              <span>Visit ${i + 1} of ${list.length} · ${escapeHtml(String(schedVisit.meta.viewApptTime || schedVisit.meta.time || ''))}${schedVisit.locked ? ' · locked' : ''}${st} ${schedListOpen ? '▴' : '▾'}</span></button>
+              <span>Visit ${i + 1} of ${list.length} · ${escapeHtml(String(schedVisit.meta.viewApptTime || schedVisit.meta.time || ''))}${schedVisit.locked ? ' · locked' : ''}${st} · ${schedListOpen ? 'hide list' : 'show list'}</span></button>
             <button type="button" class="smc-icon-btn" data-act="sched-next" aria-label="Next patient">›</button>
-        </div>${rows}`;
+        </div>`;
+    }
+
+    // ---- Patient list docked beside the panel (schedule mode) ----
+    let schedSide = null;
+    function schedSideRowsHtml() {
+        const list = scheduleList() || [];
+        return list.map(v => {
+            const id = String(v.encounterId), on = !!schedVisit && id === schedVisit.encounterId;
+            const s = String(v.encLock) === '1' ? 'locked' : schedStatus.get(id);
+            const tip = s === 'changes' ? 'Changes proposed' : s === 'clean' ? 'Nothing to change' : s === 'locked' ? 'Locked' : 'Not looked at yet';
+            return `<button type="button" class="ss-row${on ? ' on' : ''}" role="option" aria-selected="${on}" data-enc="${escapeHtml(id)}">
+                <span class="ss-dot" style="background:${s ? SCHED_DOT[s] : 'transparent'};border-color:${s ? SCHED_DOT[s] : '#c9d3d1'}" title="${tip}" aria-label="${tip}"></span>
+                <span class="ss-main"><span class="ss-n">${escapeHtml(String(v.name || ''))}</span><span class="ss-m">${escapeHtml(String(v.viewApptTime || v.time || ''))} · ${escapeHtml(String(v.visitType || ''))}${String(v.encLock) === '1' ? ' · locked' : ''}</span></span>
+            </button>`;
+        }).join('');
+    }
+    function schedSideRender() {
+        const show = schedMode() && isPanelOpen() && schedListOpen;
+        if (!show) { if (schedSide) schedSide.hidden = true; return; }
+        if (!schedSide) {
+            schedSide = document.createElement('aside');
+            schedSide.id = 'smcSchedSide';
+            schedSide.setAttribute('aria-label', 'Patients on this schedule');
+            schedSide.innerHTML = `<div class="ss-h"><span>Patients <b class="ss-c"></b></span><button type="button" class="ss-x" data-x="1" aria-label="Hide the patient list" title="Hide">×</button></div><div class="ss-list" role="listbox"></div>`;
+            document.body.appendChild(schedSide);
+            schedSide.addEventListener('click', e => {
+                if (e.target.closest('[data-x]')) { schedListOpen = false; renderPanel(true); return; }
+                const row = e.target.closest('[data-enc]');
+                if (!row) return;
+                const v = (scheduleList() || []).find(x => String(x.encounterId) === row.dataset.enc);
+                if (v && String(v.encounterId) !== (schedVisit && schedVisit.encounterId)) schedSelect(v);
+            });
+        }
+        schedSide.hidden = false;
+        const r = panel.getBoundingClientRect();
+        if (panelSide === 'left') { schedSide.style.left = Math.round(r.right) + 'px'; schedSide.style.right = 'auto'; }
+        else { schedSide.style.right = Math.round(window.innerWidth - r.left) + 'px'; schedSide.style.left = 'auto'; }
+        const list = scheduleList() || [];
+        const count = schedSide.querySelector('.ss-c'); if (count) count.textContent = String(list.length);
+        const html = schedSideRowsHtml(), box = schedSide.querySelector('.ss-list');
+        if (box.dataset.h !== html) { const top = box.scrollTop; box.innerHTML = html; box.dataset.h = html; box.scrollTop = top; }
     }
 
     // ====================== SCHEDULE MODE: SAVE (Add to EMR) ======================
@@ -6349,6 +6398,7 @@
         const gender = getGenderFromDOM();
         const insurance = parseInsuranceFromPage(text);
         const name = getPatientName();
+        schedSideRender();
         setHtmlIfChanged('smcHeadInfo', `${schedNavHtml()}
             <div class="smc-pt-name">${escapeHtml(name || 'Current patient')}</div>
             <div class="smc-pt-meta">
@@ -6524,7 +6574,7 @@
         if (onChart && schedVisit) schedClear();
 
         if (!onChart && onSchedulePage()) {
-            if (!isPanelOpen()) { showLauncher(); updateLauncherBadge(); }
+            if (!isPanelOpen()) { showLauncher(); updateLauncherBadge(); if (schedSide) schedSide.hidden = true; }
             else {
                 if (!schedVisit) schedSelect((scheduleList() || [])[0]);
                 renderPanel();
@@ -6535,6 +6585,7 @@
             return;
         }
         if (!onChart && schedVisit) schedClear();
+        if (schedSide && !schedSide.hidden && (!schedMode() || !isPanelOpen())) schedSide.hidden = true;
 
         if (onChart) {
             if (!isPanelOpen()) { showLauncher(); updateLauncherBadge(); }

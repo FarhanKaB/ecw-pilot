@@ -34,6 +34,8 @@
     // ICDs that are ALWAYS removed when found on a chart (guideline §15).
     // (The opposite of EXCLUDE_ICD above, which is never touched.)
     const ALWAYS_DELETE_ICD = new Set(['Z01.00', 'Z02.5', 'Z09', 'Z02.1']);
+    // Flu vaccine codes always swapped for the current ones (old → new).
+    const FLU_CODE_SWAPS = { '90694': '90653', '90674': '90661' };
     const EXCLUDED_ICD_SET = new Set(EXCLUDE_ICD.map(c => String(c).trim().toUpperCase()));
     const EXCLUDED_CPT_SET = new Set(EXCLUDE_CPT.map(c => String(c).trim().toUpperCase()));
     function isExcludedCode(item) {
@@ -1644,14 +1646,15 @@
         '90656': 1, '90657': 1, '90658': 1, '90660': 1, '90661': 1,
         '90672': 1, '90674': 1, '90682': 1, '90685': 1, '90686': 1,
         '90694': 1,   // influenza, adjuvanted (Fluad) — 1 component
-        '90687': 1, '90688': 1, '90756': 1
+        '90687': 1, '90688': 1, '90756': 1,
+        '90653': 1,   // influenza, adjuvanted (Fluad) — replaces 90694
     };
     // COVID vaccines are never counted via 90460-90474 — always 90480,
     // for every patient regardless of age or payer.
     const COVID_VACCINE_CODES = new Set(['91319', '91320', '91321', '91322', '91323', '91304']);
     // Medicare-only overrides (no age limit) — these use their own G-codes
     // instead of the standard 90460-90474 scheme, for Medicare patients only.
-    const FLU_VACCINE_CODES = new Set(['90656', '90657', '90658', '90660', '90661', '90672', '90674', '90682', '90685', '90686', '90687', '90688', '90694', '90756']);
+    const FLU_VACCINE_CODES = new Set(['90656', '90657', '90658', '90660', '90661', '90672', '90674', '90682', '90685', '90686', '90687', '90688', '90694', '90756', '90653']);
     const PNEUMOCOCCAL_VACCINE_CODES = new Set(['90670', '90671', '90677', '90732']);
     const HEPB_VACCINE_CODES = new Set(['90740', '90743', '90744', '90746', '90747']);
     // Every admin code this feature manages — used to find stale/wrong ones.
@@ -2899,6 +2902,20 @@
         if (!currentCodes.has('90656') && currentRows.some(r => r.code === '96686' || r.code === '90688')) {
             toAdd.push({ code: '90656', reason: 'Replaces 96686/90688', kind: 'cpt' });
         }
+
+        // ---- Flu vaccine code swaps (2026–27 season) ----
+        // 90694 → 90653, 90674 → 90661: the old code is removed and the new
+        // one added (once, even if it's already there).
+        Object.entries(FLU_CODE_SWAPS).forEach(([oldCode, newCode]) => {
+            const row = currentRows.find(r => r.code === oldCode);
+            if (!row) return;
+            if (!toDelete.some(d => d.code === oldCode)) {
+                toDelete.push({ code: oldCode, row: row.row, kind: 'cpt', reason: `Replaced with ${newCode}` });
+            }
+            if (!currentCodes.has(newCode) && !toAdd.some(a => a.code === newCode)) {
+                toAdd.push({ code: newCode, reason: `Replaces ${oldCode}`, kind: 'cpt' });
+            }
+        });
 
         // ---- Vaccine administration coding ----
         // Works out 90460/90461 (0–18, component-based), 90471/90472 (19+)

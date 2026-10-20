@@ -3,9 +3,9 @@
     "history": {
       "label": "History",
       "path": "shared/history.js",
-      "version": "1.1",
+      "version": "2.0",
       "notes": [
-        "Loads the patient picked on the schedule (ignored whenever a chart is open)"
+        "Faster, no page text: visits from eCW's Angular data; CPT/E&M codes in batches of 25; diagnoses per visit (6 at a time); insurance from each visit's claim — first only for the visits the rules need (same year / last 60 days), the rest in the background. No note reading, no merging."
       ]
     },
     "sort": {
@@ -33,8 +33,10 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.38",
+          "version": "1.40",
           "notes": [
+            "Works with History 2.0 (rules refresh when background insurance arrives); the 30-day gap checks now use the visit date on the schedule too",
+            "Schedule mode: patient list shows each visit's status; schedule dots repainted only when something changed",
             "Schedule mode: Add to EMR from the schedule — added/removed codes (incl. CPT removals and office-visit swaps), order, primary, modifiers (Smart Sort) and pointers (Link) in one save, then read back and checked",
             "Schedule mode: patient list docked beside the panel (time, name, type, colored dot) — click a patient to open it; 'hide list' / 'show list' in the panel header",
             "Dots on the schedule rows for visits you've looked at (amber = changes, green = none, grey = locked)",

@@ -278,7 +278,16 @@
         #smcPanel .smc-reset { margin-left: 8px; font-size: 11px; }
         #smcPanel .smc-sched { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 6px 8px; border-radius: 8px; background: #e8f1fb; color: #1d4f8a; }
         #smcPanel .smc-sched .smc-icon-btn { font-size: 18px; line-height: 1; }
-        #smcPanel .smc-sched-mid { flex: 1; display: flex; flex-direction: column; align-items: center; font-size: 11.5px; text-align: center; }
+        #smcPanel .smc-sched-mid { flex: 1; display: flex; flex-direction: column; align-items: center; font-size: 11.5px; text-align: center; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 2px 4px; border-radius: 6px; font-family: inherit; }
+        #smcPanel .smc-sched-mid:hover { background: rgba(29, 79, 138, .08); }
+        #smcPanel .smc-sched-list { max-height: 280px; overflow: auto; margin: -2px 0 10px; border: 1px solid var(--smc-line); border-radius: 8px; background: var(--smc-surface, #fff); }
+        #smcPanel .smc-sched-row { display: grid; grid-template-columns: 12px 64px 1fr auto; gap: 8px; align-items: center; width: 100%; padding: 7px 10px; border: 0; border-bottom: 1px solid var(--smc-line-2); background: transparent; color: var(--smc-ink); font: 12.5px/1.3 inherit; text-align: left; cursor: pointer; }
+        #smcPanel .smc-sched-row:last-child { border-bottom: 0; }
+        #smcPanel .smc-sched-row:hover { background: var(--smc-line-2); }
+        #smcPanel .smc-sched-row.on { background: #e8f1fb; color: #1d4f8a; font-weight: 600; }
+        #smcPanel .smc-sched-row .t { color: var(--smc-ink-3); font-size: 11.5px; }
+        #smcPanel .smc-sched-row .k { color: var(--smc-ink-3); font-size: 11px; }
+        #smcPanel .smc-sched-dot2 { width: 8px; height: 8px; border-radius: 50%; border: 1px solid; }
         #smcPanel .smc-sched-tag { font-weight: 600; }
         #smcPanel .smc-manual { padding: 6px 10px; font-size: 11.5px; color: var(--smc-ink-3); border-top: 1px dashed var(--smc-line-2); }
         #smcPanel .smc-manual-code { display: inline-flex; align-items: center; gap: 2px; margin-right: 6px; font-weight: 600; color: var(--smc-del); }
@@ -922,17 +931,30 @@
             }
         });
     }
+    let schedListOpen = false;
+    const SCHED_DOT = { changes: '#e0a100', clean: '#2e9d57', locked: '#9aa5a8' };
     function schedNavHtml() {
         if (!schedMode()) return '';
         const list = scheduleList() || [];
         const i = list.findIndex(v => String(v.encounterId) === schedVisit.encounterId);
         const st = schedVisit.state === 'loading' ? ' · loading…' : schedVisit.state === 'failed' ? ' · couldn’t load' : '';
+        const rows = schedListOpen ? `<div class="smc-sched-list" role="listbox" aria-label="Patients on this schedule">${list.map(v => {
+            const id = String(v.encounterId), on = id === schedVisit.encounterId;
+            const s = String(v.encLock) === '1' ? 'locked' : schedStatus.get(id);
+            return `<button type="button" class="smc-sched-row${on ? ' on' : ''}" role="option" aria-selected="${on}" data-act="sched-pick" data-enc="${escapeHtml(id)}">
+                <span class="smc-sched-dot2" style="background:${s ? SCHED_DOT[s] : 'transparent'};border-color:${s ? SCHED_DOT[s] : 'var(--smc-line)'}" title="${s === 'changes' ? 'Changes proposed' : s === 'clean' ? 'Nothing to change' : s === 'locked' ? 'Locked' : 'Not looked at yet'}"></span>
+                <span class="t">${escapeHtml(String(v.viewApptTime || v.time || ''))}</span>
+                <span class="n">${escapeHtml(String(v.name || ''))}</span>
+                <span class="k">${escapeHtml(String(v.visitType || ''))}${String(v.encLock) === '1' ? ' · locked' : ''}</span>
+            </button>`;
+        }).join('')}</div>` : '';
         return `<div class="smc-sched">
             <button type="button" class="smc-icon-btn" data-act="sched-prev" aria-label="Previous patient">‹</button>
-            <div class="smc-sched-mid"><span class="smc-sched-tag">From the schedule — chart not opened</span>
-              <span>Visit ${i + 1} of ${list.length} · ${escapeHtml(String(schedVisit.meta.viewApptTime || schedVisit.meta.time || ''))}${schedVisit.locked ? ' · locked' : ''}${st}</span></div>
+            <button type="button" class="smc-sched-mid" data-act="sched-list" aria-expanded="${schedListOpen}" title="Show the patients on this schedule">
+              <span class="smc-sched-tag">From the schedule — chart not opened</span>
+              <span>Visit ${i + 1} of ${list.length} · ${escapeHtml(String(schedVisit.meta.viewApptTime || schedVisit.meta.time || ''))}${schedVisit.locked ? ' · locked' : ''}${st} ${schedListOpen ? '▴' : '▾'}</span></button>
             <button type="button" class="smc-icon-btn" data-act="sched-next" aria-label="Next patient">›</button>
-        </div>`;
+        </div>${rows}`;
     }
 
     // ====================== SCHEDULE MODE: SAVE (Add to EMR) ======================
@@ -6116,6 +6138,17 @@
                 else if (act.dataset.act === 'reload') location.reload();
                 else if (act.dataset.act === 'dismiss') { resultNotice = null; renderPanel(); }
                 else if (act.dataset.act === 'ack-update') { if (PILOT && PILOT.ackUpdate) PILOT.ackUpdate(); renderPanel(true); }
+                else if (act.dataset.act === 'sched-list') {
+                    e.preventDefault();
+                    schedListOpen = !schedListOpen;
+                    renderPanel(true);
+                }
+                else if (act.dataset.act === 'sched-pick') {
+                    e.preventDefault();
+                    schedListOpen = false;
+                    const v = (scheduleList() || []).find(x => String(x.encounterId) === act.dataset.enc);
+                    if (v && String(v.encounterId) !== (schedVisit && schedVisit.encounterId)) schedSelect(v); else renderPanel(true);
+                }
                 else if (act.dataset.act === 'sched-prev' || act.dataset.act === 'sched-next') {
                     e.preventDefault();
                     schedStep(act.dataset.act === 'sched-next' ? 1 : -1);

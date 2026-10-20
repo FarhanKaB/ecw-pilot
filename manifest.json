@@ -3,9 +3,9 @@
     "history": {
       "label": "History",
       "path": "shared/history.js",
-      "version": "1.0",
+      "version": "1.1",
       "notes": [
-        "Patient history now loads as its own shared file"
+        "Loads the patient picked on the schedule (ignored whenever a chart is open)"
       ]
     },
     "sort": {
@@ -33,22 +33,22 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.33",
+          "version": "1.36",
           "notes": [
-            "Flu code swaps: 90694 → 90653 and 90674 → 90661 (90653 gets its admin code, G0008 for Medicare)",
-            "Vaccine admin: 90460/90461 for ages 0–18, 90471/90472 from 19 (same ages as SL). Added 90694 (adjuvanted flu): 1 component, G0008 for Medicare",
-            "Dragging opens a gap and the other rows slide aside; ↑ ↓ slide the rows too. The ↑ ↓ × buttons are now clearly visible",
-            "Manual order: drag codes (or use ↑ ↓) in 'After changes'; applied on Add to EMR. 'Reset order' goes back to ECW Pilot's order"
+            "Schedule mode: Add to EMR from the schedule — added/removed codes (incl. CPT removals and office-visit swaps), order, primary, modifiers (Smart Sort) and pointers (Link) in one save, then read back and checked",
+            "Dots on the schedule rows for visits you've looked at (amber = changes, green = none, grey = locked)",
+            "Schedule mode (view only): on eCW's schedule, ECW Pilot's panel shows the visit you pick (click its row or use ‹ ›) with the same proposals as in the chart — chart not opened, nothing saved",
+            "Fix: proposals refresh once the visit's vitals and chief complaint have loaded"
           ]
         },
         "link": {
           "label": "Link",
           "path": "clients/highland/link.js",
-          "version": "1.10",
+          "version": "1.11",
           "notes": [
+            "Plans pointers and SL for saving from the schedule",
             "90653 linked to Z23 (SL under 18)",
-            "SL modifier only for patients under 18 (age on the visit day)",
-            "Age on the VISIT day from eCW's Angular data only; DOB cross-checked between patient and visit records"
+            "SL modifier only for patients under 18 (age on the visit day)"
           ]
         }
       },

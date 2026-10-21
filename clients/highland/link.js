@@ -638,15 +638,6 @@
         PILOT.linkMode = linkMode;
         PILOT.linkNow = () => (linkMode() === 'auto' ? runLink(true) : null);
         // For the panel's Modifiers table: which of these codes Link gives SL.
-        // Schedule mode (no Billing screen): plan pointers + SL from plain lists.
-        // icdCodes in eCW row order (row number = position + 1).
-        PILOT.linkPlan = (cptCodes, icdCodes, age) => {
-            const icds = (icdCodes || []).map((code, i) => ({ code: String(code).trim().toUpperCase(), rawText: String(code), rowNum: String(i + 1) }));
-            return (cptCodes || []).map(code => {
-                const c = String(code).trim().toUpperCase();
-                return { code: c, picks: planCPT(c, icds).slice(0, 4).map(p => ({ code: p.code, rowNum: p.rowNum })), sl: age !== null && age !== undefined && age < 18 && SL_MODIFIER_CPTS.has(c) };
-            });
-        };
         PILOT.linkSLCodes = codes => {
             const age = getPatientAge();
             if (age === null || age >= 18) return [];

@@ -3,9 +3,9 @@
     "history": {
       "label": "History",
       "path": "shared/history.js",
-      "version": "2.0",
+      "version": "1.0",
       "notes": [
-        "Faster, no page text: visits from eCW's Angular data; CPT/E&M codes in batches of 25; diagnoses per visit (6 at a time); insurance from each visit's claim — first only for the visits the rules need (same year / last 60 days), the rest in the background. No note reading, no merging."
+        "Patient history now loads as its own shared file"
       ]
     },
     "sort": {
@@ -33,25 +33,22 @@
         "coding": {
           "label": "Coding",
           "path": "clients/highland/coding.js",
-          "version": "1.40",
+          "version": "1.33",
           "notes": [
-            "Works with History 2.0 (rules refresh when background insurance arrives); the 30-day gap checks now use the visit date on the schedule too",
-            "Schedule mode: patient list shows each visit's status; schedule dots repainted only when something changed",
-            "Schedule mode: Add to EMR from the schedule — added/removed codes (incl. CPT removals and office-visit swaps), order, primary, modifiers (Smart Sort) and pointers (Link) in one save, then read back and checked",
-            "Schedule mode: patient list docked beside the panel (time, name, type, colored dot) — click a patient to open it; 'hide list' / 'show list' in the panel header",
-            "Dots on the schedule rows for visits you've looked at (amber = changes, green = none, grey = locked)",
-            "Schedule mode (view only): on eCW's schedule, ECW Pilot's panel shows the visit you pick (click its row or use ‹ ›) with the same proposals as in the chart — chart not opened, nothing saved",
-            "Fix: proposals refresh once the visit's vitals and chief complaint have loaded"
+            "Flu code swaps: 90694 → 90653 and 90674 → 90661 (90653 gets its admin code, G0008 for Medicare)",
+            "Vaccine admin: 90460/90461 for ages 0–18, 90471/90472 from 19 (same ages as SL). Added 90694 (adjuvanted flu): 1 component, G0008 for Medicare",
+            "Dragging opens a gap and the other rows slide aside; ↑ ↓ slide the rows too. The ↑ ↓ × buttons are now clearly visible",
+            "Manual order: drag codes (or use ↑ ↓) in 'After changes'; applied on Add to EMR. 'Reset order' goes back to ECW Pilot's order"
           ]
         },
         "link": {
           "label": "Link",
           "path": "clients/highland/link.js",
-          "version": "1.11",
+          "version": "1.10",
           "notes": [
-            "Plans pointers and SL for saving from the schedule",
             "90653 linked to Z23 (SL under 18)",
-            "SL modifier only for patients under 18 (age on the visit day)"
+            "SL modifier only for patients under 18 (age on the visit day)",
+            "Age on the VISIT day from eCW's Angular data only; DOB cross-checked between patient and visit records"
           ]
         }
       },

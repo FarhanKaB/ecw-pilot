@@ -4,339 +4,154 @@
    window.__ecwPatientHistory for the coding panel and other modules.
    Loaded by the ECW Pilot loader. To release a change: edit this file,
    then raise "history" -> "version" in manifest.json.
-
-   v2.0 — no page text, no note reading:
-     • patient + visit list ...... eCW's Angular data (or the visit picked
-                                   on the schedule)
-     • CPT / E&M codes ........... /emr/ov/getEncAddtlBillingData, 25 visits
-                                   per request (per-visit XML as fallback)
-     • diagnoses ................. getAssessment.jsp per visit (XML)
-     • insurance per visit ....... the visit's claim (or, not billed yet,
-                                   the patient's current insurance). Fetched
-                                   first only for the visits the rules need
-                                   (same calendar year / last 60 days);
-                                   History is ready then, and the rest fills
-                                   in the background.
+   ============================================================ */
+/* ============================================================
+   MODULE 1 — PATIENT HISTORY (data loader)
+   Fetches and parses the patient's past encounters. Since v1.98
+   it no longer draws its own button or drawer — the History tab
+   of the SmartCoder panel (Module 2) renders this data through
+   the window.__ecwPatientHistory bridge at the end.
    ============================================================ */
 (function () {
   "use strict";
-  if (window.__ecwPatientHistory) return;   // already running on this page
+  if (window.__ecwPatientHistory) return; // already running on this page
 
   // ─── CONFIG ──────────────────────────────────────────────────────────────────
-  const MAX_HISTORY_ENCOUNTERS = 50;
-  const FETCH_CONCURRENCY      = 6;
-  const FETCH_TIMEOUT_MS       = 12000;
-  const BILLING_BATCH_SIZE     = 25;
-  const PRIORITY_DAYS          = 60;     // insurance needed first for visits this recent…
-  const WATCH_INTERVAL_MS      = 1500;   // …or in the same calendar year as the visit
-  const CACHE_MAX              = 400;
-  const EP = {
-    assessment:   "/mobiledoc/jsp/catalog/xml/getAssessment.jsp",
-    billingBatch: "/mobiledoc/emr/ov/getEncAddtlBillingData",
-    billingOne:   "/mobiledoc/jsp/catalog/xml/getEncAddtlBillingData.jsp",
-    claimForEnc:  "/mobiledoc/jsp/catalog/xml/CheckClaimForEnc.jsp",
-    claimDetail:  "/mobiledoc/jsp/rcm/claims/getClaimDetail.jsp",
-    claimIns:     "/mobiledoc/jsp/catalog/xml/edi/getInvInsList.jsp",
-    ptIns:        "/mobiledoc/jsp/catalog/xml/getPtInsurances.jsp"
-  };
+  // Ported from "ECW - Patient ICD/CPT History" 2026-09-10.3 (data loader
+  // only — its own button/drawer UI is not used; the SmartCoder panel's
+  // History tab renders this data through window.__ecwPatientHistory).
+  const TARGET_URL_PART =
+    "mobiledoc/jsp/webemr/progressnotes/physiciansdashboard/dashboard.jsp";
+
+  const SELECTOR =
+    `img[onclick*="showPopUp"][onclick*="/mobiledoc/jsp/picks/selVisitCodes.jsp"]`;
+
+  const MAX_HISTORY_ENCOUNTERS    = 50;   // v2.12: was 100 (too slow)
+  const BUTTON_CHECK_INTERVAL_MS  = 3000;
+  const FETCH_CONCURRENCY         = 4;    // parallel fetches (safe for ECW)
+  const FETCH_TIMEOUT_MS          = 12000; // abort stalled requests after 12 s
 
   // ─── STATE ───────────────────────────────────────────────────────────────────
-  let data = null, loading = false, loadPromise = null;
-  let currentPatientKey = "", loadedKey = "", token = 0, revision = 0;
-  let progress = { total: 0, completed: 0, current: "", currentDos: "", errors: 0, partial: [] };
-  let scheduleTarget = null;             // { pid, encId, dos, encIds: {id: date} } — schedule mode
-  const cache = new Map();               // encounterId -> { codes, assessments, insurance… } (older visits)
+  let lastUrl             = location.href;
+  let patientHistoryData  = null;
+  let isHistoryLoading    = false;
+  let currentPatientKey   = "";
+  let historyLoadPromise  = null;
+  let activeLoadToken     = 0;
+  let lastEncDropDownTitle = "";  // tracks #encDropDownItem title for patient-change detection
 
-  // ─── ANGULAR CONTEXT (no page text) ──────────────────────────────────────────
-  function ngScopeOf(sel) {
-    const el = document.querySelector(sel);
-    if (!el || !window.angular) return null;
-    try { const a = angular.element(el); return a.isolateScope() || a.scope(); } catch (e) { return null; }
+  // Keyed by encounter_id → parsed response object. Cleared at 2000 entries.
+  const encounterCache = new Map();
+  const ENCOUNTER_CACHE_MAX = 2000;
+
+  let historyProgress = { total: 0, completed: 0, current: "", errors: 0 };
+
+  // The standalone script's drawer UI is not used here — these keep the
+  // loader's calls into it harmless.
+  function isModalOpen() { return false; }
+  function safeRenderProgress() {}
+  function renderHistoryData() {}
+  function closePatientHistoryModal() {}
+
+  // ─── DATA LOADER (verbatim from 2026-09-10.3) ────────────────────────────────
+  function yieldToBrowser(){return new Promise(e=>"requestIdleCallback"in window?requestIdleCallback(e,{timeout:200}):setTimeout(e,0))}function sleep(e){return new Promise(t=>setTimeout(t,e))}async function waitForEncounterIds(e=12e3){const t=Date.now();let n=0;for(;Date.now()-t<e;){n++;const e=getEncounterIds(),t=void 0;if(Object.keys(e).length)return lastEncDropDownTitle=document.querySelector("#encDropDownItem")?.title||"",e;await sleep(500)}return{}}async function pooledMap(e,t,n){const r=new Array(e.length);let o=0;async function i(){for(;o<e.length;){const n=o++;r[n]=await t(e[n],n)}}const a=Array.from({length:Math.min(n,e.length)},i);return await Promise.all(a),r}function isDashboardPage(){return location.href.includes(TARGET_URL_PART)}function getPidAndEncDate(){const e=document.querySelector(SELECTOR);if(e?.getAttribute("pid"))return{pid:e.getAttribute("pid"),encdate:e.getAttribute("encdate")||null,encid:e.getAttribute("encid")||null};const t=new URLSearchParams(location.search).get("pid");if(t)return{pid:t,encdate:null,encid:null};const n=document.querySelector("tr.patient_header_tr span, #patientHeaderSpan, .patient_header_tr td span");if(n){const e=n.textContent.match(/Acc\s*No[.:]?\s*(\d+)/i);if(e)return{pid:e[1],encdate:null,encid:null}}const r=void 0,o=(document.body?.textContent||"").match(/Acc\s*No[.:]?\s*(\d+)/i);return o?{pid:o[1],encdate:null,encid:null}:null}function getCurrentEncounterId(){const e=getPidAndEncDate();if(e?.encid)return String(e.encid).trim();const t=document.querySelector('#encDropDownList li.hlight-enc[id^="encList_"]');return t?t.id.replace("encList_","").trim():""}function getCurrentPatientKey(){const e=getPidAndEncDate();return e?.pid?`pid_${e.pid}`:""}function getEncounterIds(){const e=Array.from(document.querySelectorAll('#encDropDownList li[id^="encList_"]'));if(!e.length)return{};const t=e.findIndex(e=>e.classList.contains("hlight-enc")),n=t>=0?e.slice(t):e,r=[];let o=0,i=0;for(const e of n){const t=e.firstElementChild;if(t&&String(t.className||"").includes("telencounter")){o++;continue}const n=e.id.replace("encList_","").trim();if(!n)continue;const a=e.querySelector(".enc-lbl-span"),s=void 0,c=(a?.textContent?.trim()||"").match(/\d{2}\/\d{2}\/\d{4}/);c?r.push({encounter_id:n,dos:c[0]}):i++}const a=getPidAndEncDate();if(a?.encid){const e=String(a.encid).trim(),t=normalizeHistoryDate(a.encdate)||a.encdate||getCurrentEncounterDos();e&&!r.some(t=>t.encounter_id===e)&&r.push({encounter_id:e,dos:t||""})}if(!r.length)return{};const s=void 0;return Object.fromEntries(r.sort((e,t)=>Number(t.encounter_id)-Number(e.encounter_id)).slice(0,MAX_HISTORY_ENCOUNTERS).map(e=>[e.encounter_id,e.dos]))}const RE_SCRIPT=/<script[\s\S]*?<\/script>/gi,RE_STYLE=/<style[\s\S]*?<\/style>/gi,RE_TAGS=/<[^>]+>/g,RE_NBSP=/&nbsp;/gi,RE_AMP=/&amp;/gi,RE_QUOT=/&quot;/gi,RE_APOS=/&#039;/gi,RE_NNBSP=/\u00a0/g,RE_WS=/\s+/g;function clean(e){return String(e||"").replace(RE_SCRIPT," ").replace(RE_STYLE," ").replace(RE_TAGS," ").replace(RE_NBSP," ").replace(RE_AMP,"&").replace(RE_QUOT,'"').replace(RE_APOS,"'").replace(RE_NNBSP," ").replace(RE_WS," ").trim()}function nodeText(e){return e?e.textContent.replace(RE_WS," ").trim():""}function normalizeHeading(e){return clean(e).replace(/:$/,"").toLowerCase()}function getSectionContainer(e,t){const n=(Array.isArray(t)?t:[t]).map(normalizeHeading),r=e.querySelectorAll("tr.leftPaneHeading, tr.rightPaneHeading");for(const e of r)if(n.includes(normalizeHeading(e.textContent)))return e.closest('td[valign="top"]')||e.closest("td")||e.parentElement||e;return null}const RE_PAYER_ID=/\s*Payer\s*ID\s*:?\s*\d+\s*$/i;function cleanInsuranceName(e){const t=e.replace(RE_PAYER_ID,"").trim();return t.length>32?t.substring(0,32).trim():t}const RE_INS_AFTER=/Insurance:\s*([^\n\r]+?)(?:\s*(?:Referring:|Appointment Facility:|Account Number:|Guarantor:)|$)/i,RE_INS_SIMPLE=/Insurance:\s*(.+)/i;function parseInsurance(e,t,n){const r=n.querySelectorAll("tr.PatientData td, tr.PtData td");for(const e of r){const t=e.textContent||"";if(/Insurance:/i.test(t)){const e=void 0,n=t.replace(/\u00a0/g," ").replace(/\s+/g," ").trim().match(/Insurance:\s*([^]+?)(?:\s*(?:Referring:|Appointment Facility:|Account Number:|Guarantor:)|$)/i);if(n){const e=cleanInsuranceName(clean(n[1]));if(e)return e}}}const o=n.querySelector("tr.patient_header_tr span");if(o){const e=void 0,t=o.textContent.replace(/\u00a0/g," ").replace(/\s+/g," ").trim().match(/Insurance:\s*([^]+?)(?:\s*(?:Referring:|Account Number:|Guarantor:|PCP:|$))/i);if(t){const e=cleanInsuranceName(clean(t[1]));if(e)return e}}let i=t.match(RE_INS_AFTER);if(i){const e=cleanInsuranceName(clean(i[1]));if(e)return e}return i=e.match(/Insurance:(?:&nbsp;|\s)*([\s\S]*?)<\/td>/i),cleanInsuranceName(clean(i?.[1]||""))}function cleanProviderName(e){if(!e)return"";let t=clean(e);const n=[/\s+on\s+\d{2}\/\d{2}\/\d{4}.*/i,/\s+DOB[:\s].*/i,/\s+Age[:\s]\d+.*/i,/\s+Date[:\s]\d{2}\/\d{2}\/\d{4}.*/i,/\s+Sign\s*off.*/i,/\s+Electronic.*signature.*/i,/\s+\d{2}\/\d{2}\/\d{4}.*/,/\s+at\s+\d{1,2}:\d{2}\s*(?:AM|PM).*/i,/\s+EDT.*/i,/\s+EST.*/i];for(const e of n)t=t.replace(e,"");return t=t.replace(/[,\s]+$/,"").trim(),t.length>32&&(t=t.substring(0,32).trim()),t}const RE_PCP_BODY=/\bPCP:\s*(.{1,80}?)(?=\s{2,}|\s+(?:Subjective|Objective|Assessment|Plan|Chief|HPI|DOB|Age|Address|Phone|Account|Patient)\b|$)/i,RE_PCP_PROG_NOTE=/Progress Notes?:\s*(.{1,80}?)(?=\s{2,}|\s+(?:Subjective|Objective|Patient|DOB)\b|$)/i;function parsePcp(e,t){const n=t.querySelectorAll("tr.PatientData td, tr.PtData td");for(const e of n){const t=e.textContent||"";if(/\bPCP:/i.test(t)){const e=void 0,n=t.replace(/\u00a0/g," ").replace(/\s+/g," ").trim().match(/\bPCP:\s*(.+)/i);if(n){const e=cleanProviderName(n[1]);if(e)return e}}}const r=t.querySelector('table[prisma-section="Header"]');if(r){let e="",t="";for(const n of r.querySelectorAll("td")){const r=n.textContent.replace(/\u00a0/g," ").replace(/\s+/g," ").trim();if(!e){const t=r.match(/^\s*Pcp\s*:\s*(.+)/i);t&&(e=cleanProviderName(t[1]))}if(!t){const e=r.match(/^\s*Provider\s*:\s*(.+)/i);e&&(t=cleanProviderName(e[1]))}if(e&&t)break}const n=e||t;if(n&&n.length>1)return n}const o=t.querySelectorAll("td.PageHeader");for(const e of o){const t=e.textContent.replace(/\u00a0/g," ").replace(/\s+/g," ").trim();if(/Progress Notes?:/i.test(t)){const e=t.match(/Progress Notes?:\s*(.+)/i);if(e){const t=cleanProviderName(e[1]);if(t)return t}}}const i=t.querySelectorAll("tr.TableFooter td");for(const e of i){const t=e.textContent.replace(/\u00a0/g," ").replace(/\s+/g," ").trim();if(/\bProvider:\s*/i.test(t)){const e=t.match(/\bProvider:\s*(.+)/i);if(e){const t=cleanProviderName(e[1]);if(t)return t}}}let a=e.match(RE_PCP_BODY);if(a){const e=cleanProviderName(a[1]);if(e)return e}return a=e.match(RE_PCP_PROG_NOTE),a?cleanProviderName(a[1]):""}const RE_DATE_US=/\b(\d{2}\/\d{2}\/\d{4})\b/,RE_DATE_DOS=/\bDOS:\s*(\d{2}\/\d{2}\/\d{4})\b/i,RE_DATE_NOTE=/Progress Note:\s*.*?(\d{2}\/\d{2}\/\d{4})\b/i,RE_DATE_LABEL=/\bDate:\s*(\d{2}\/\d{2}\/\d{4})\b/i;function parseEncounterDate(e,t){const n=e.querySelectorAll(".PageHeader");for(const e of n){const t=e.textContent.match(RE_DATE_US);if(t)return t[1]}const r=e.querySelectorAll("td");for(const e of r){const t=void 0,n=e.textContent.replace(/\u00a0/g," ").replace(/\s+/g," ").trim().match(RE_DATE_LABEL);if(n)return n[1]}const o=e.querySelector("tr.patient_header_tr span");if(o){const e=o.textContent.match(RE_DATE_DOS);if(e)return e[1]}return t.match(RE_DATE_DOS)?.[1]||t.match(RE_DATE_NOTE)?.[1]||""}const RE_ASSESSMENT=/^(.+?)\s*-\s*([A-Z][A-Z0-9.]+)\s*$/i,RE_LEADING_NUM=/^\d+\.\s*/,RE_PRIMARY=/\(Primary\)/gi,RE_NOTES_CUT=/\s*Notes\s*:/i;function parseAssessmentLine(e){let t=clean(e).replace(RE_PRIMARY,"").replace(RE_LEADING_NUM,"").trim();t=t.split(RE_NOTES_CUT)[0].trim();const n=t.match(RE_ASSESSMENT);if(!n)return null;const r=clean(n[2]),o=clean(n[1]);return!r||r.replace(/\s/g,"").length<2?null:{code:r,details:o,modifiers:""}}function parseAssessments(e){const t=[],n=new Set,r=e=>{if(!e?.code||!e.code.trim())return;const r=`${e.code}|${e.details}`;n.has(r)||(n.add(r),t.push(e))},o=getSectionContainer(e,"Assessments");if(o){for(const e of o.querySelectorAll("tr.leftPaneData, tr.rightPaneData")){const t=[...e.children].filter(e=>"TD"===e.tagName);t.length&&(t.length>=2&&/^\s*\d+\.\s*$/.test(nodeText(t[0]))?r(parseAssessmentLine(t.slice(1).map(e=>e.textContent).join(" "))):r(parseAssessmentLine(e.textContent)))}for(const e of o.querySelectorAll("td")){if(e.querySelector("td, table"))continue;const t=nodeText(e);t.length<5||r(parseAssessmentLine(t))}}const i=e.querySelector('table[prisma-section="Assessment"]');if(i){for(const e of i.querySelectorAll("div")){if(e.querySelector("div, td, table"))continue;const t=nodeText(e);t.length<5||r(parseAssessmentLine(t))}for(const e of i.querySelectorAll("td")){if(e.querySelector("td, table"))continue;const t=nodeText(e);t.length<5||r(parseAssessmentLine(t))}}return t}const RE_MODIFIERS=/Modifiers:\s*([A-Z0-9,\-\s]+)/i,RE_CODE_LINE=/^((?=[A-Z0-9]{4,6}\b)(?=[A-Z0-9]*\d)[A-Z0-9]{4,6})\s+(.+)$/i,RE_SKIP=/^(Visit Codes?|Procedure Codes?|Codes|Sign|Note)$/i,RE_SKIP_BODY=/generated by eClinicalWorks|off status|marked as done/i,RE_CODE_BOUNDARY=/,\s*(?=(?=[A-Z0-9]*\d)[A-Z0-9]{4,6}\s)/i;function parseCodeLine(e){const t=clean(e);if(!t||RE_SKIP.test(t)||RE_SKIP_BODY.test(t))return null;const n=t.match(RE_MODIFIERS),r=clean(n?.[1]||"").replace(/\.$/,""),o=void 0,i=t.replace(RE_MODIFIERS,"").replace(/\.$/,"").trim().match(RE_CODE_LINE);return i?{code:clean(i[1]),details:clean(i[2]).replace(/\.$/,""),modifiers:r}:null}function parseCodeContainer(e,t){const n=[],r=new Set,o=e=>{if(!e?.code||!e.code.trim())return;const t=`${e.code}|${e.details}|${e.modifiers}`;r.has(t)||(r.add(t),n.push(e))},i=getSectionContainer(e,t);if(i){for(const e of i.querySelectorAll("li"))o(parseCodeLine(e.textContent));for(const e of i.querySelectorAll("td")){if(e.querySelector("table, ul, li"))continue;const t=nodeText(e);t.length<5||o(parseCodeLine(t))}if(!n.length)for(const e of i.querySelectorAll("tr.leftPaneData, tr.rightPaneData")){const t=nodeText(e);t.length<5||o(parseCodeLine(t))}}if(!n.length){const r=Array.isArray(t)?t:[t],i=new Set;for(const e of r){const t=e.replace(/s$/i,""),n=t+"s";for(const e of[t,n])i.add(e),i.add(e.toLowerCase()),i.add(e.replace(/\b\w/g,e=>e.toUpperCase()))}for(const t of i){const r=e.querySelector(`table[prisma-section="${t}"]`);if(r){for(const e of r.querySelectorAll("td")){if(e.querySelector(":scope > table"))continue;const t=nodeText(e);t.length<5||o(parseCodeLine(t))}if(n.length)break}}}if(!n.length){const r=Array.isArray(t)?t:[t],i=[...new Set(r.map(e=>e.replace(/s$/i,"")))].join("|"),a=new RegExp(`^\\s*(?:${i})s?\\s*:`,"i"),s=e.querySelectorAll("td");for(const e of s){if(e.querySelector("table"))continue;if(e.closest("table[prisma-section]"))continue;const t=nodeText(e);if(!a.test(t))continue;const r=void 0,i=(e.innerHTML||"").split(/<br\s*\/?>/i);for(const e of i){const t=clean(e).replace(a,"");for(const q of t.split(RE_CODE_BOUNDARY)){const p=q.trim();p.length<5||o(parseCodeLine(p))}}if(n.length)break}}return n}const _domParser=new DOMParser;function parseHtml(e,t){const n=_domParser.parseFromString(e,"text/html"),r=(n.body?.innerText||n.body?.textContent||"").replace(RE_WS," ").trim();return{encounter_id:String(t),encounter_date:parseEncounterDate(n,r),insurance_name:parseInsurance(e,r,n),pcp_name:parsePcp(r,n),assessments:parseAssessments(n),visit_codes:parseCodeContainer(n,["Visit Code","Visit Codes"]),procedure_codes:parseCodeContainer(n,["Procedure Code","Procedure Codes"])}}async function fetchEncounter(e){const t=new AbortController,n=setTimeout(()=>t.abort(),FETCH_TIMEOUT_MS);try{const n=await fetch(e,{credentials:"include",headers:{Accept:"text/html"},signal:t.signal});if(!n.ok)throw new Error(`HTTP ${n.status}`);return await n.text()}finally{clearTimeout(n)}}function normalizeCaretsBillingCode(e){const t=String(e||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim().toUpperCase();if(!t)return"";const n=t.match(/\b([A-Z]?\d{4,5}[A-Z]?|[A-Z][A-Z0-9]{4,6})\b/);return n?n[1]:""}function caretsPlainText(e){return String(e||"").replace(/\u00a0/g," ").replace(/\s+/g," ").trim()}function stripCodeFromText(e,t){const n=caretsPlainText(e);if(!n||!t)return"";const r=String(t).replace(/[.*+?^${}()|[\]\\]/g,"\\$&");return n.replace(new RegExp(`^.*?\\b${r}\\b[:\\-–,]*\\s*`,"i"),"").replace(new RegExp(`\\b${r}\\b`,"ig"),"").replace(/^[:\\-–,]+/,"").trim()}function isGarbageCaretsName(e){const t=caretsPlainText(e);return!t||(!!/^\d+([_.:-]\d+)+$/.test(t)||(!!/^[\d\s,._\-]+$/.test(t)||!/[A-Za-z]/.test(t)))}function looksLikeCaretsName(e,t){const n=caretsPlainText(e);if(!n)return"";const r=stripCodeFromText(n,t)||(n.toUpperCase()===String(t).toUpperCase()?"":n);return r?r.toUpperCase()===String(t).toUpperCase()||r.length<2||isGarbageCaretsName(r)?"":r:""}function caretsVisibleText(e){if(!e||1!==e.nodeType)return"";const t=e.cloneNode(!0);return t.querySelectorAll("input, select, textarea, script, style, button").forEach(e=>e.remove()),caretsPlainText(t.textContent)}function caretsSiblingText(e){return e?3===e.nodeType?caretsPlainText(e.textContent):1===e.nodeType?/^(INPUT|SELECT|TEXTAREA|SCRIPT|STYLE|BUTTON)$/i.test(e.tagName)?"":caretsVisibleText(e):"":""}function extractCaretsName(e,t){if(!e||!t)return"";const n=[e.getAttribute?.("title"),e.getAttribute?.("data-original-title"),e.getAttribute?.("icdname"),e.getAttribute?.("desc"),e.getAttribute?.("dxname"),e.getAttribute?.("cptname")],r=[caretsVisibleText(e),caretsSiblingText(e.nextSibling),caretsSiblingText(e.nextElementSibling),caretsVisibleText(e.parentElement)],o=e.closest?.("tr")||e.parentElement;if(o)for(const e of o.querySelectorAll("td"))r.push(caretsVisibleText(e));for(const e of[...n,...r]){const n=looksLikeCaretsName(e,t);if(n)return n}return""}function extractCaretsCodeItem(e){if(!e)return null;const t=caretsPlainText(e.textContent),n=e.closest?.("tr")||e.parentElement,r=caretsPlainText(n?.textContent||t),o=normalizeCaretsBillingCode(t)||normalizeCaretsBillingCode(r);if(!o)return null;const i=parseCodeLine(r)||parseCodeLine(t),a=i?.code&&normalizeCaretsBillingCode(i.code)===o&&i.details?i.details:extractCaretsName(e,o);return{code:o,details:isGarbageCaretsName(a)?"":a||"",modifiers:i?.modifiers||""}}function toCodeItem(e){const t=String(e||"").trim().toUpperCase();return t?{code:t,details:"",modifiers:""}:null}function appendUniqueCodeItems(e,t){const n=[...e||[]],r=new Map;n.forEach((e,t)=>{const n=String(e.code||"").trim().toUpperCase();n&&r.set(n,t)});for(const e of t||[]){const t="object"==typeof e&&e?{code:String(e.code||"").trim().toUpperCase(),details:isGarbageCaretsName(e.details)?"":e.details||"",modifiers:e.modifiers||""}:toCodeItem(e);if(t?.code){if(r.has(t.code)){const e=n[r.get(t.code)];!e.details&&t.details&&(e.details=t.details),!e.modifiers&&t.modifiers&&(e.modifiers=t.modifiers);continue}r.set(t.code,n.length),n.push(t)}}return n}async function paginateCaretsHistory(e,t,n=100,r=null,o=null,i=""){const a=[],s=new Set,c=String(i||"").trim();let d;try{d=new URL(e)}catch{return a}let l=0;for(;l++<n;){let e="";try{e=await fetchEncounter(d.toString())}catch{break}let n=[];try{n=t(e)||[]}catch{break}if(!Array.isArray(n)||!n.length)break;const i=n.map(e=>e&&e.date).filter(Boolean).map(e=>parseUSDate(e)).filter(e=>e>0);if(!i.length)break;const l=Math.max(...i),p=Math.min(...i);if(null!=r&&l<r)break;let u=!1;for(const e of n){if(!e)continue;const t=String(e.encounterId||"").trim();if(!t||s.has(t))continue;s.add(t);const n=c&&t===c,i=parseUSDate(e.date);if(!n){if(null!=o&&i>0&&i>o)continue;if(null!=r&&i>0&&i<r)continue}a.push(e),u=!0}if(!u)break;if(null!=r&&p<=r)break;try{const e=new Date(p);if(Number.isNaN(+e))break;e.setDate(e.getDate()-1),d.searchParams.set("encdate",formatUSDate(e))}catch{break}}return a}function collectCaretsCodeItems(e,t){const n=[];if(!e||!t)return n;const r=new Set,o=e=>{try{const t=extractCaretsCodeItem(e);if(!t?.code)return;if(r.has(t.code)){const e=n.find(e=>e.code===t.code);return void(e&&!e.details&&t.details&&!isGarbageCaretsName(t.details)&&(e.details=t.details))}r.add(t.code),n.push(t)}catch{}},i=[...e.querySelectorAll("#dispdatarow")];if(i.length){for(const e of i){const n=[...e.querySelectorAll(t)];n.length?n.forEach(o):o(e)}return n}return e.querySelectorAll(t).forEach(o),n}function parseCaretsVisitCodesHtml(e){try{const t=void 0,n=_domParser.parseFromString(e||"","text/html").querySelector("#caretsCont");return n?[...n.querySelectorAll(".col-sm-12.nopadding.bottom5")].map(e=>{const t=e.querySelectorAll("thead th");return{encounterId:t[0]?.querySelector("input")?.value||null,date:normalizeHistoryDate(t[1]?.textContent?.trim()||""),codes:collectCaretsCodeItems(e,"#dispdatarow .fnt13, .fnt13")}}):[]}catch{return[]}}function parseCaretsProcedureCodesHtml(e){try{const t=void 0,n=_domParser.parseFromString(e||"","text/html").querySelector("#caretsCont");return n?[...n.querySelectorAll(".col-sm-12.nopadding.whitebg.bottom5")].map(e=>{const t=e.querySelectorAll("thead th");return{encounterId:t[0]?.querySelector("input[name='enc']")?.value||null,date:normalizeHistoryDate(t[1]?.textContent?.trim()||""),codes:collectCaretsCodeItems(e,"#dispdatarow .fnt12, .fnt12")}}).filter(e=>e.encounterId):[]}catch{return[]}}function parseCaretsAssessmentHtml(e){try{const t=void 0,n=_domParser.parseFromString(e||"","text/html").querySelector("#caretsCont");return n?[...n.querySelectorAll(".separateEncounterContainer")].map(e=>{const t=e.querySelectorAll("thead th"),n=[],r=new Set;for(const t of e.querySelectorAll("input[name='Dx_encId']")){const e=caretsPlainText(t.getAttribute("mc")).toUpperCase();if(!e||"N/A OTHER"===e)continue;const o=normalizeCaretsBillingCode(e)||e.split(/\s+/)[0];if(!o||r.has(o))continue;r.add(o);const i=looksLikeCaretsName(e,o)||extractCaretsName(t,o)||"";n.push({code:o,details:isGarbageCaretsName(i)?"":i||"",modifiers:""})}return{encounterId:t[0]?.querySelector("input[name='enc']")?.value||null,date:normalizeHistoryDate(t[1]?.textContent?.trim()||""),codes:n}}).filter(e=>e.encounterId):[]}catch{return[]}}function buildCaretsHistoryRows(e,t,n){const r=new Map,o=e=>{const t=normalizeHistoryDate(e?.date),n=String(e?.encounterId||"").trim();return t||n?`${t}__${n}`:""},i=e=>{const t=o(e);return t?(r.has(t)||r.set(t,{encounter_id:String(e.encounterId||"").trim(),encounter_date:normalizeHistoryDate(e.date),insurance_name:"",pcp_name:"",assessments:[],visit_codes:[],procedure_codes:[]}),r.get(t)):null},a=(e,t,n)=>{const r=i(e);r&&n?.length&&(r[t]=appendUniqueCodeItems(r[t],n))};return e.forEach(e=>a(e,"visit_codes",e.codes)),t.forEach(e=>a(e,"procedure_codes",e.codes)),n.forEach(e=>a(e,"assessments",e.codes)),[...r.values()].filter(e=>e.encounter_date)}async function getCaretsVisitHistory(minTs){try{const e=getPidAndEncDate()||{},t=e.pid||document.querySelector("#patientId")?.value||document.querySelector("#pid")?.value||null,n=e.encdate||getCurrentEncounterDos()||"",r=e.encid||document.querySelector("#encounterId")?.value||null;if(!t||!n)return[];const i=parseUSDate(n)||Date.now(),c=String(r||getCurrentEncounterId()||"").trim(),d=(()=>{const e=parseUSDate(n);if(!e)return n;const t=new Date(e);return t.setDate(t.getDate()+1),formatUSDate(t)})(),l=location.origin,p=new URL("/mobiledoc/jsp/webemr/progressnotes/carets/caretsVisitCodes.jsp",l);p.searchParams.set("pid",t),p.searchParams.set("encdate",d),p.searchParams.set("module","VisitCodes");const u=new URL("/mobiledoc/jsp/webemr/progressnotes/carets/caretsProcedureCodes.jsp",l);u.searchParams.set("pid",t),u.searchParams.set("encdate",d),u.searchParams.set("module","ProcedureCodes");const f=new URL("/mobiledoc/jsp/webemr/progressnotes/carets/caretsAssessment.jsp",l);f.searchParams.set("pid",t),f.searchParams.set("encdate",d),f.searchParams.set("module","Assessment"),c&&f.searchParams.set("encid",c);const[m,b,g]=await Promise.all([paginateCaretsHistory(p,parseCaretsVisitCodesHtml,100,minTs||null,i,c).catch(()=>[]),paginateCaretsHistory(u,parseCaretsProcedureCodesHtml,100,minTs||null,i,c).catch(()=>[]),paginateCaretsHistory(f,parseCaretsAssessmentHtml,100,minTs||null,i,c).catch(()=>[])]);return buildCaretsHistoryRows(m||[],b||[],g||[])}catch{return[]}}function mergeHistoryByEncounter(e,t){const n=(e||[]).map(e=>({encounter_id:String(e.encounter_id||"").trim(),encounter_date:normalizeHistoryDate(e.encounter_date)||e.encounter_date||"",insurance_name:e.insurance_name||"",pcp_name:e.pcp_name||"",assessments:[...e.assessments||[]],visit_codes:[...e.visit_codes||[]],procedure_codes:[...e.procedure_codes||[]]})),r=new Map,o=new Map;for(const e of n)e.encounter_id&&r.set(e.encounter_id,e),e.encounter_date&&(o.has(e.encounter_date)||o.set(e.encounter_date,[]),o.get(e.encounter_date).push(e));const i=(e,t)=>{e&&t&&(e.assessments=appendUniqueCodeItems(e.assessments,t.assessments),e.visit_codes=appendUniqueCodeItems(e.visit_codes,t.visit_codes),e.procedure_codes=appendUniqueCodeItems(e.procedure_codes,t.procedure_codes))};for(const e of t||[]){const t=String(e.encounter_id||"").trim(),a=normalizeHistoryDate(e.encounter_date);if(!a&&!t)continue;let s=null;if(t&&r.has(t))s=r.get(t);else if(a){const e=o.get(a)||[];1===e.length?s=e[0]:t&&(s=e.find(e=>e.encounter_id===t)||null)}if(s){i(s,e);continue}if(!a)continue;const c={encounter_id:t,encounter_date:a,insurance_name:"",pcp_name:"",assessments:appendUniqueCodeItems([],e.assessments),visit_codes:appendUniqueCodeItems([],e.visit_codes),procedure_codes:appendUniqueCodeItems([],e.procedure_codes)};n.push(c),t&&r.set(t,c),o.has(a)||o.set(a,[]),o.get(a).push(c)}const a=getCurrentEncounterId(),s=getCurrentEncounterDos();return n.map(e=>(e.encounter_date&&normalizeHistoryDate(e.encounter_date)||!a||e.encounter_id!==a||!s||(e.encounter_date=normalizeHistoryDate(s)||s),e)).filter(e=>e.encounter_date||a&&e.encounter_id===a).sort((e,t)=>parseUSDate(t.encounter_date)-parseUSDate(e.encounter_date))}async function get_patient_icd_cpt_history(e,t){const n=await waitForEncounterIds(),r=Object.entries(n),o=document.querySelector("#userProId")?.value||"";historyProgress={total:r.length,completed:0,current:"",currentDos:"",errors:0,partial:[]},e?.(historyProgress);const curEncId=getCurrentEncounterId(),caretsMinTs=r.length>=MAX_HISTORY_ENCOUNTERS?(()=>{const d=r.map(([,x])=>parseUSDate(x)).filter(x=>x>0);return d.length?Math.min(...d):null})():null,i=getCaretsVisitHistory(caretsMinTs).catch(()=>[]),a=`${location.origin}/mobiledoc/jsp/catalog/xml/printChartOptions.jsp?FormData=Default&isHtml=true&requestFrom=RCP&style=ModernII&encType=1&Device=webemr&ecwappprocessid=0&TrUserId=${encodeURIComponent(o)}`,s=async([n,r])=>{if(t!==activeLoadToken)return{encounter_id:String(n),encounter_date:r,insurance_name:"",assessments:[],visit_codes:[],procedure_codes:[],error:"Cancelled"};if(historyProgress.current=n,historyProgress.currentDos=r,e?.(historyProgress),String(n)!==curEncId&&encounterCache.has(n)){const r=encounterCache.get(n);return t===activeLoadToken&&(historyProgress.partial.push(r),e?.(historyProgress)),historyProgress.completed++,e?.(historyProgress),r}const o=`${a}&encounterID=${encodeURIComponent(n)}`;try{const i=await fetchEncounter(o);if(await yieldToBrowser(),t!==activeLoadToken)throw new Error("Cancelled");const a=parseHtml(i,n);return!a.encounter_date&&r&&(a.encounter_date=r),String(n)!==curEncId&&(encounterCache.size>=ENCOUNTER_CACHE_MAX&&encounterCache.clear(),encounterCache.set(n,a)),t===activeLoadToken&&(historyProgress.partial.push(a),e?.(historyProgress)),a}catch(e){return historyProgress.errors++,{encounter_id:String(n),encounter_date:r,insurance_name:"",assessments:[],visit_codes:[],procedure_codes:[],error:String(e?.message||e)}}finally{historyProgress.completed++,e?.(historyProgress)}},c=await pooledMap(r,s,FETCH_CONCURRENCY);if(t===activeLoadToken&&(historyProgress.current="",historyProgress.currentDos="",e?.(historyProgress)),t!==activeLoadToken)return c;let d=[];try{t===activeLoadToken&&(historyProgress.currentDos="Merging Carets…",e?.(historyProgress)),d=await i}catch(e){d=[]}if(t!==activeLoadToken)return c;const l=getCurrentEncounterId();let p=c.filter(e=>e&&(!e.error||String(e.encounter_id)===l));try{p=mergeHistoryByEncounter(p,Array.isArray(d)?d:[])}catch{}return t===activeLoadToken&&(historyProgress.currentDos="",historyProgress.partial=p,e?.(historyProgress)),p}function normalizeHistoryDate(e){const t=String(e||"").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);return t?`${String(t[1]).padStart(2,"0")}/${String(t[2]).padStart(2,"0")}/${t[3]}`:""}function parseUSDate(e){const t=normalizeHistoryDate(e),n=String(t||"").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);return n?+new Date(+n[3],+n[1]-1,+n[2]):0}function formatUSDate(e){return`${String(e.getMonth()+1).padStart(2,"0")}/${String(e.getDate()).padStart(2,"0")}/${e.getFullYear()}`}function rowHasCodes(e){return!!(e.assessments?.some(e=>e.code?.trim())||e.visit_codes?.some(e=>e.code?.trim())||e.procedure_codes?.some(e=>e.code?.trim()))}function getCurrentEncounterDos(){const t=(document.querySelector("#encDropDownItem")?.title||"").match(/\b(\d{2}\/\d{2}\/\d{4})\b/);return t?t[1]:""}async function loadPatientHistoryOnce(e=!1){const t=getCurrentPatientKey();if(!t)return[];if(!e&&patientHistoryData&&currentPatientKey===t)return patientHistoryData;if(historyLoadPromise)return historyLoadPromise;currentPatientKey=t,isHistoryLoading=!0,patientHistoryData=null,activeLoadToken++;const n=activeLoadToken;return isModalOpen()&&renderHistoryData(),historyLoadPromise=(async()=>{try{const e=await get_patient_icd_cpt_history(safeRenderProgress,n);return n===activeLoadToken?patientHistoryData=e:patientHistoryData||currentPatientKey!==t||(patientHistoryData=e),e}catch(e){return n===activeLoadToken&&(patientHistoryData=[]),[]}finally{n===activeLoadToken?(isHistoryLoading=!1,historyLoadPromise=null,isModalOpen()&&renderHistoryData()):patientHistoryData||currentPatientKey!==t||(isHistoryLoading=!1,historyLoadPromise=null,isModalOpen()&&renderHistoryData())}})(),historyLoadPromise}
+
+  // ─── WATCHERS (button-free) ──────────────────────────────────────────────────
+  // Same triggers as the standalone script — URL change, patient change via
+  // #encDropDownItem, periodic heartbeat — but they only (re)load data.
+  function resetPatientHistoryState() {
+    activeLoadToken++;
+    patientHistoryData = null;
+    historyLoadPromise = null;
+    isHistoryLoading = false;
+    currentPatientKey = "";
+    lastEncDropDownTitle = "";
+    historyProgress = { total: 0, completed: 0, current: "", currentDos: "", errors: 0, partial: [] };
   }
-  function scopeValue(key) {
-    if (!window.angular) return null;
-    for (const el of document.querySelectorAll(".ng-scope")) {
-      try { for (let s = angular.element(el).scope(); s; s = s.$parent) if (s[key] != null) return s[key]; } catch (e) {}
+
+  function ensurePatientHistoryLoaded() {
+    if (!isDashboardPage()) return;
+    const e = getPidAndEncDate();
+    if (!e?.pid) return;
+    const t = getCurrentPatientKey();
+    if (!t || t === currentPatientKey || isHistoryLoading || historyLoadPromise) return;
+    loadPatientHistoryOnce(true);
+  }
+
+  function checkPageState() {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      resetPatientHistoryState();
     }
-    return null;
+    ensurePatientHistoryLoaded();
   }
-  // The open chart: patient, open visit, visit list — from Angular.
-  function chartContext() {
-    const tabs = ngScopeOf("#tabspanel"), pn = ngScopeOf("#pnController");
-    let pid = tabs && tabs.patientId || pn && pn.patientId;
-    let encid = String(tabs && (tabs.currentEnc && tabs.currentEnc.encounterId || tabs.encounterId) || pn && pn.encounterId || "");
-    let list = tabs && Array.isArray(tabs.patientEncounters) ? tabs.patientEncounters : null;
-    if (!pid || !encid) {
-      const ras = scopeValue("roomAndStatus"), enc = ras && ras.encounterObj;
-      if (enc) { pid = pid || enc.patientId; encid = encid || String(enc.encounterId || ""); }
+
+  function onEncounterTitle(title) {
+    if (!title || title === lastEncDropDownTitle || !isDashboardPage()) return;
+    const key = getCurrentPatientKey();
+    if (isHistoryLoading || historyLoadPromise || !key) { lastEncDropDownTitle = title; return; }
+    if (key === currentPatientKey) {
+      // Same patient, different encounter: reload so the DOS cut-off and the
+      // current encounter's own codes are right.
+      lastEncDropDownTitle = title;
+      patientHistoryData = null;
+      historyLoadPromise = null;
+      isHistoryLoading = false;
+      activeLoadToken++;
+      historyProgress = { total: 0, completed: 0, current: "", currentDos: "", errors: 0, partial: [] };
+      loadPatientHistoryOnce(true);
+      return;
     }
-    if (!list) { const l = scopeValue("patientEncounters"); list = Array.isArray(l) ? l : []; }
-    if (!pid || !encid) return null;
-    return { pid: String(pid), encid, list };
-  }
-  function context() {
-    const c = chartContext();
-    if (c) return c;                                   // a chart is open: always the chart
-    if (scheduleTarget) return { pid: String(scheduleTarget.pid), encid: String(scheduleTarget.encId), list: null, target: scheduleTarget };
-    return null;
+    resetPatientHistoryState();
+    lastEncDropDownTitle = title;
+    ensurePatientHistoryLoaded();
   }
 
-  // ─── HELPERS ─────────────────────────────────────────────────────────────────
-  function normDate(s) {
-    const t = String(s || "").trim();
-    let m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (m) return `${m[1].padStart(2, "0")}/${m[2].padStart(2, "0")}/${m[3]}`;
-    m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
-    return m ? `${m[2]}/${m[3]}/${m[1]}` : "";
-  }
-  function ts(s) { const m = normDate(s).match(/^(\d{2})\/(\d{2})\/(\d{4})$/); return m ? +new Date(+m[3], +m[1] - 1, +m[2]) : 0; }
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const yieldToBrowser = () => new Promise(r => ("requestIdleCallback" in window ? requestIdleCallback(r, { timeout: 200 }) : setTimeout(r, 0)));
-  const userId = () => (window.global && window.global.TrUserId) || document.querySelector("#userProId")?.value || "";
-
-  async function xfetch(url, opts = {}) {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
-    try {
-      const r = await fetch(url, { credentials: "include", ...opts, signal: ctl.signal });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r;
-    } finally { clearTimeout(t); }
-  }
-  async function pool(items, fn, n) {
-    const out = new Array(items.length); let i = 0;
-    await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
-      while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); }
-    }));
-    return out;
-  }
-  const xp = new DOMParser();
-  const parseXml = t => { const d = xp.parseFromString(String(t || ""), "text/xml"); return d.querySelector("parsererror") ? null : d; };
-  const child = (n, tag) => { for (const c of n.children) if (c.nodeName === tag) return (c.textContent || "").trim(); return ""; };
-
-  // ─── PARSERS (structured XML / JSON only) ────────────────────────────────────
-  function parseAssessments(text) {
-    const doc = parseXml(text); if (!doc) return [];
-    const out = [], seen = new Set();
-    for (const grp of ["primary", "secondary"]) for (const g of doc.getElementsByTagName(grp)) for (const c of g.children) {
-      if (c.nodeName !== "code") continue;
-      const code = child(c, "medicalcode").toUpperCase();
-      if (!code || seen.has(code)) continue;
-      seen.add(code);
-      out.push({ code, details: child(c, "name"), modifiers: "", primary: grp === "primary", order: Number(child(c, "displayindex") || child(c, "displayIndex")) || 999 });
-    }
-    return out.sort((a, b) => (b.primary - a.primary) || (a.order - b.order));
-  }
-  function parseBilling(text) {
-    const res = { visit_codes: [], procedure_codes: [] };
-    const doc = parseXml(text); if (!doc) return res;
-    const seen = new Set();
-    for (const it of doc.getElementsByTagName("item")) {
-      const code = child(it, "code").toUpperCase(); if (!code) continue;
-      const mods = ["mod1", "mod2", "mod3", "mod4"].map(m => child(it, m)).filter(Boolean);
-      const key = code + "|" + mods.join(","); if (seen.has(key)) continue; seen.add(key);
-      const row = { code, details: child(it, "name"), modifiers: mods.join(", "), units: child(it, "units") };
-      (child(it, "codeFlag") === "E" ? res.visit_codes : res.procedure_codes).push(row);
-    }
-    return res;
-  }
-
-  // ─── LOADERS ─────────────────────────────────────────────────────────────────
-  async function loadBillingMap(ids) {
-    const map = new Map();
-    for (let i = 0; i < ids.length; i += BILLING_BATCH_SIZE) {
-      const chunk = ids.slice(i, i + BILLING_BATCH_SIZE);
-      try {
-        const j = await (await xfetch(EP.billingBatch, { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ encounterIds: chunk.map(Number) }) })).json();
-        for (const id of chunk) { const v = j && j[id]; if (typeof v === "string" && v.trim()) map.set(id, parseBilling(v)); }
-      } catch (e) { /* fall back per visit below */ }
-    }
-    const missing = ids.filter(id => !map.has(id));
-    await pool(missing, async id => {
-      try { map.set(id, parseBilling(await (await xfetch(`${EP.billingOne}?Id=${encodeURIComponent(id)}`)).text())); }
-      catch (e) { map.set(id, { visit_codes: [], procedure_codes: [], error: true }); }
-    }, FETCH_CONCURRENCY);
-    return map;
-  }
-  async function loadAssessments(id) {
-    return parseAssessments(await (await xfetch(`${EP.assessment}?Id=${encodeURIComponent(id)}&TrUserId=${encodeURIComponent(userId())}&Device=webemr`)).text());
-  }
-  // Insurance billed on the visit's claim ('' when there is no claim yet).
-  async function loadClaimInsurance(encId) {
-    const d = parseXml(await (await xfetch(EP.claimForEnc, { method: "POST", body: new URLSearchParams({ encounterId: encId }) })).text());
-    const claimId = (d && d.getElementsByTagName("claimId")[0]?.textContent || "").trim();
-    if (!claimId || claimId === "0") return { claimId: "", name: "" };
-    let name = "";
-    try {
-      const j = await (await xfetch(`${EP.claimDetail}?claimId=${encodeURIComponent(claimId)}`)).json();
-      if (j && String(j.status).toLowerCase() === "success") {
-        const ins = (j.insurance || []).map(i => ({ name: String(i.name || "").trim(), seq: Number(i.sequence) || 99 })).filter(i => i.name).sort((a, b) => a.seq - b.seq);
-        name = ins[0] ? ins[0].name : "";
-      }
-    } catch (e) {}
-    if (!name) {
-      try {
-        const x = parseXml(await (await xfetch(`${EP.claimIns}?InvId=${encodeURIComponent(claimId)}`)).text());
-        const rows = x ? [...x.getElementsByTagName("InsName")].map(n => ({ name: (n.textContent || "").trim(), seq: Number(child(n.parentNode, "SeqNo")) || 99 })).filter(r => r.name) : [];
-        rows.sort((a, b) => a.seq - b.seq);
-        name = rows[0] ? rows[0].name : "";
-      } catch (e) {}
-    }
-    return { claimId, name };
-  }
-  // The patient's current primary insurance (for visits not billed yet).
-  async function loadCurrentInsurance(pid) {
-    const p = scopeValue("patientobj");
-    const fromAngular = p && (String(p.insurance || "").trim() || String(p.insurances || "").split(/[,;|\n]/).map(x => x.trim()).filter(Boolean)[0]);
-    if (fromAngular && !scheduleTarget) return fromAngular;
-    try {
-      const d = parseXml(await (await xfetch(`${EP.ptIns}?patientid=${encodeURIComponent(pid)}`)).text());
-      if (!d) return fromAngular || "";
-      const rows = [...d.getElementsByTagName("*")].filter(n => [...n.children].some(c => c.nodeName === "insuranceName"))
-        .map(n => ({ name: child(n, "insuranceName"), seq: Number(child(n, "SeqNo")) || 99, active: child(n, "ActiveIns") !== "0" }))
-        .filter(r => r.name && r.active).sort((a, b) => a.seq - b.seq);
-      return rows[0] ? rows[0].name : (fromAngular || "");
-    } catch (e) { return fromAngular || ""; }
-  }
-
-  // ─── VISIT LIST ──────────────────────────────────────────────────────────────
-  // The open visit and the older ones (newest first), up to 50.
-  function visitList(c) {
-    let rows;
-    if (c.target) {
-      rows = Object.entries(c.target.encIds || {}).map(([id, dos]) => ({ id: String(id), dos: normDate(dos) }));
-    } else {
-      const all = (c.list || []).filter(e => e && e.encounterID);
-      const idx = all.findIndex(e => String(e.encounterID) === c.encid);
-      rows = (idx >= 0 ? all.slice(idx) : all).map(e => ({ id: String(e.encounterID), dos: normDate(e.date), visitType: e.visitType || "" }));
-    }
-    if (!rows.some(r => r.id === c.encid)) rows.unshift({ id: c.encid, dos: c.target ? normDate(c.target.dos) : "" });
-    rows.sort((a, b) => (ts(b.dos) - ts(a.dos)) || (Number(b.id) - Number(a.id)));
-    const cur = rows.find(r => r.id === c.encid);
-    const curTs = cur ? ts(cur.dos) : 0;
-    return rows.filter(r => r.id === c.encid || !curTs || !ts(r.dos) || ts(r.dos) <= curTs).slice(0, MAX_HISTORY_ENCOUNTERS);
-  }
-  // Visits whose insurance the rules need: same calendar year as the open
-  // visit, or within PRIORITY_DAYS before it.
-  function isPriority(v, curDos) {
-    if (!curDos || !v.dos) return true;
-    const a = ts(v.dos), b = ts(curDos);
-    return new Date(a).getFullYear() === new Date(b).getFullYear() || (b - a) <= PRIORITY_DAYS * 864e5;
-  }
-
-  // ─── BUILD ───────────────────────────────────────────────────────────────────
-  async function build(tk, c) {
-    const encs = visitList(c);
-    const cur = c.encid, curDos = (encs.find(e => e.id === cur) || {}).dos || "";
-    progress = { total: encs.length, completed: 0, current: "", currentDos: "", errors: 0, partial: [] };
-    const currentInsP = loadCurrentInsurance(c.pid);
-
-    // 1-3 run at the same time: codes (batch), diagnoses (per visit) and the
-    // insurance of the visits the rules need. Older visits' insurance fills in
-    // afterwards in the background.
-    const needCodes = encs.filter(e => e.id === cur || !cache.has(e.id)).map(e => e.id);
-    const billP = needCodes.length ? loadBillingMap(needCodes) : Promise.resolve(new Map());
-    const insOf = new Map();                               // encounterId -> { name, source }
-    const fetchIns = async e => {
-      if (insOf.has(e.id)) return;
-      const cached = e.id !== cur && cache.get(e.id);
-      if (cached && cached.insurance_source === "claim") { insOf.set(e.id, { name: cached.insurance_name, source: "claim" }); return; }
-      let ci = { name: "" };
-      try { ci = await loadClaimInsurance(e.id); } catch (err) {}
-      const currentIns = await currentInsP;
-      insOf.set(e.id, ci.name ? { name: ci.name, source: "claim" } : { name: currentIns || "", source: currentIns ? "patient-current" : "" });
+  function startTitleWatcher() {
+    let observed = null;
+    const attach = () => {
+      const el = document.querySelector("#encDropDownItem");
+      if (!el || el === observed) return !!el;
+      observed = el;
+      new MutationObserver(() => {
+        onEncounterTitle(el.getAttribute("title") || el.textContent?.trim() || "");
+      }).observe(el, { attributes: true, attributeFilter: ["title"], childList: true, subtree: true, characterData: true });
+      return true;
     };
-    const nowEncs = encs.filter(e => e.id === cur || isPriority(e, curDos));
-    const laterEncs = encs.filter(e => !nowEncs.includes(e));
-    const insNowP = pool(nowEncs, fetchIns, 3);
-    const asmP = pool(encs, async e => {
-      if (tk !== token) return null;
-      progress.current = e.id; progress.currentDos = e.dos;
-      try {
-        if (e.id !== cur && cache.has(e.id)) return { e, cached: Object.assign({}, cache.get(e.id)) };
-        const assessments = await loadAssessments(e.id);
-        await yieldToBrowser();
-        return { e, assessments };
-      } catch (err) { progress.errors++; return { e, error: String(err && err.message || err) }; }
-      finally { progress.completed++; }
-    }, FETCH_CONCURRENCY);
-    const [bill, asm] = await Promise.all([billP, asmP]);
-    if (tk !== token) return null;
-    progress.currentDos = "Insurance…";
-    await insNowP;
-    if (tk !== token) return null;
-    const rowOf = x => {
-      if (!x) return null;
-      if (x.cached) return x.cached;
-      const e = x.e, b = bill.get(e.id) || { visit_codes: [], procedure_codes: [] }, ins = insOf.get(e.id) || { name: "", source: "" };
-      const row = { encounter_id: e.id, encounter_date: e.dos, visit_type: e.visitType || "", insurance_name: ins.name, insurance_source: ins.source,
-        assessments: x.assessments || [], visit_codes: b.visit_codes, procedure_codes: b.procedure_codes };
-      if (x.error) row.error = x.error; else if (b.error) row.error = "codes unavailable";
-      if (e.id !== cur && !row.error && row.insurance_source === "claim") { if (cache.size >= CACHE_MAX) cache.clear(); cache.set(e.id, Object.assign({}, row)); }
-      return row;
-    };
-    const list = asm.map(rowOf).filter(Boolean);
-    progress.partial = list;
-    // background: older visits' insurance (rules don't wait for these)
-    const later = list.filter(r => laterEncs.some(e => e.id === r.encounter_id) && !r.insurance_source);
-    if (later.length) {
-      (async () => {
-        await pool(later, async r => {
-          await fetchIns({ id: r.encounter_id });
-          const ins = insOf.get(r.encounter_id);
-          if (ins) { r.insurance_name = ins.name; r.insurance_source = ins.source; }
-          if (r.encounter_id !== cur && !r.error && r.insurance_source === "claim") { if (cache.size >= CACHE_MAX) cache.clear(); cache.set(r.encounter_id, Object.assign({}, r)); }
-        }, 3);
-        if (tk === token) revision++;
-      })();
-    }
-    progress.currentDos = "";
-    list.sort((a, b) => (ts(b.encounter_date) - ts(a.encounter_date)) || (Number(b.encounter_id) - Number(a.encounter_id)));
-    return list;
+    attach();
+    setInterval(() => {
+      if (!isDashboardPage()) return;
+      attach();
+      const title = document.querySelector("#encDropDownItem")?.getAttribute("title") || "";
+      if (title && title !== lastEncDropDownTitle) onEncounterTitle(title);
+    }, 1000);
   }
 
-  function load(force) {
-    const c = context();
-    if (!c) return Promise.resolve([]);
-    const key = `pid_${c.pid}`, encKey = `${key}|${c.encid}`;
-    if (!force && data && loadedKey === encKey) return Promise.resolve(data);
-    currentPatientKey = key; loadedKey = encKey;
-    loading = true; data = null; revision++;
-    const tk = ++token;
-    loadPromise = (async () => {
-      try { const d = await build(tk, c); if (tk === token && d) data = d; return d || []; }
-      catch (e) { console.warn("[ECW Pilot] history failed", e); if (tk === token) data = []; return []; }
-      finally { if (tk === token) { loading = false; loadPromise = null; revision++; } }
-    })();
-    return loadPromise;
+  function startWatcher() {
+    checkPageState();
+    setInterval(checkPageState, BUTTON_CHECK_INTERVAL_MS);
+    startTitleWatcher();
+    window.addEventListener("hashchange", checkPageState);
+    window.addEventListener("popstate", checkPageState);
+    let debounce = null;
+    new MutationObserver(() => {
+      clearTimeout(debounce);
+      debounce = setTimeout(ensurePatientHistoryLoaded, 400);
+    }).observe(document.body, { childList: true, subtree: true });
   }
 
-  // ─── WATCHER: reload when the patient or the open visit changes ──────────────
-  function tick() {
-    const c = context();
-    if (!c) return;
-    const encKey = `pid_${c.pid}|${c.encid}`;
-    if (encKey !== loadedKey) load(true);
-  }
-  setInterval(tick, WATCH_INTERVAL_MS);
-  setTimeout(tick, 300);
+  "complete" === document.readyState ? startWatcher() : window.addEventListener("load", startWatcher);
 
-  // ─── BRIDGE (same as before, plus getRevision) ───────────────────────────────
+  // ---- Bridge: lets Module 2 (SmartCoder panel) read the loaded history ----
   window.__ecwPatientHistory = {
-    getData: () => data,
-    isLoading: () => loading,
-    getErrors: () => progress.errors || 0,
+    getData: () => patientHistoryData,
+    isLoading: () => isHistoryLoading,
+    getErrors: () => (historyProgress && historyProgress.errors) || 0,
     getCurrentKey: () => currentPatientKey,
-    getEncounterCount: () => (data ? data.length : 0),
-    getProgress: () => progress,
-    getCurrentEncounterId: () => { const c = context(); return c ? c.encid : ""; },
-    // changes whenever the data changes (incl. background insurance fill)
-    getRevision: () => revision,
-    reload: () => load(true),
-    // Schedule mode (ECW Pilot): load a patient picked on the schedule.
-    // Ignored whenever a chart is open, so the chart's History is never affected.
-    setScheduleTarget: t => { scheduleTarget = t || null; return t ? load(true) : null; },
-    getScheduleTarget: () => scheduleTarget
+    getEncounterCount: () => (patientHistoryData ? patientHistoryData.length : 0),
+    getProgress: () => historyProgress,
+    getCurrentEncounterId: () => getCurrentEncounterId(),
+    reload: () => loadPatientHistoryOnce(true)
   };
+
 })();
